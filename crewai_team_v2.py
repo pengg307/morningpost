@@ -345,7 +345,7 @@ def calculate_indicators(stocks):
     
     indicators = {}
     for stock in stocks:
-        code = stock["code"]
+        code = stock.get("code", stock.get("symbol", ""))
         price = stock.get("price", 0)
         prev_close = stock.get("prev_close", 0)
         
@@ -375,6 +375,7 @@ def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futu
     
     current_date = date_info["date_str"]
     weekday = date_info["weekday"]
+    timestamp = date_info.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     
     # 构建Prompt
     prompt = f"""你是CrewAI团队的A股晨报专家。请根据以下**真实股票数据**（{current_date} {weekday} 实时获取），生成一份专业的活跃股操盘晨报。
@@ -392,124 +393,103 @@ def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futu
 4. 如果没有新闻数据，请写"今日暂无重要财经新闻"，不要编造
 5. 如果没有美股数据，请写"美股数据暂无"，不要编造
 
-【股票数据】（来自腾讯财经API和新浪财经API，{date_info['timestamp']} 获取）
+【股票数据】（来自SQLite数据库，{timestamp} 获取）
 """
-
+    
+    # A股数据
     for stock in stocks:
-        code = stock["code"]
-        ind = indicators.get(code, {})
-        amount_yi = ind.get("amount_yi", 0)
-        pe = ind.get("pe", 0)
-        pb = ind.get("pb", 0)
-        market_val = ind.get("market_value", 0)
-        turnover = ind.get("turnover_rate", 0)
-        pct = ind.get("pct", 0)
+        code = stock.get("symbol", stock.get("code", ""))
+        name = stock.get("name", code)
+        amount_yi = stock.get("amount", 0) / 10000 if stock.get("amount", 0) else 0
+        pe = stock.get("pe", 0)
+        pb = stock.get("pb", 0)
+        market_val = stock.get("market_value", 0)
+        turnover = stock.get("turnover_rate", 0)
+        pct = stock.get("change_pct", 0)
         
         prompt += f"""
-{stock['name']}（{code}）
-- 现价: {stock['price']:.2f}元，涨跌幅: {pct:+.2f}%
-- 今开: {stock['open']:.2f}元，最高: {stock['high']:.2f}元，最低: {stock['low']:.2f}元
+{name}（{code}）
+- 现价: {stock.get('price', 0):.2f}元，涨跌幅: {pct:+.2f}%
+- 今开: {stock.get('open', 0):.2f}元，最高: {stock.get('high', 0):.2f}元，最低: {stock.get('low', 0):.2f}元
 - 成交额: {amount_yi:.2f}亿元
 - 市盈率(PE): {pe:.2f}，市净率(PB): {pb:.2f}
 - 总市值: {market_val:.2f}亿元，换手率: {turnover:.2f}%
 """
-
+    
+    # 美股数据
     prompt += f"""
-【美股数据】（来自新浪财经API，{date_info['timestamp']} 获取）
+【美股数据】（来自新浪财经API，{timestamp} 获取）
 """
-    us_stocks = fetch_us_market_stocks()
     if us_stocks:
-        for stock in us_stocks[:5]:
-            pct = (stock['price'] - stock['prev_close']) / stock['prev_close'] * 100 if stock['prev_close'] > 0 else 0
+        for stock in us_stocks[:10]:
+            pct = stock.get('change_pct', 0)
             prompt += f"""
-{stock['name']}（{stock['code']}）
+{stock.get('name', stock['symbol'])}（{stock['symbol']}）
 - 现价: ${stock['price']:.2f}，涨跌幅: {pct:+.2f}%
-- 今开: ${stock['open']:.2f}，最高: ${stock['high']:.2f}，最低: ${stock['low']:.2f}
-- 成交量: {stock['volume']:,.0f}股
+- 今开: ${stock.get('open', 0):.2f}，最高: ${stock.get('high', 0):.2f}，最低: ${stock.get('low', 0):.2f}
+- 成交量: {stock.get('volume', 0):,.0f}股
 """
     else:
         prompt += "*美股数据暂无*\n"
-
+    
+    # 期货数据
     prompt += f"""
-【美国期货数据】（来自yfinance API，{date_info['timestamp']} 获取）
+【美国期货数据】（来自新浪财经API，{timestamp} 获取）
 """
-    futures_result = fetch_us_futures_data()
-    # 缓存可能返回list，统一转换为dict
-    try:
-        _ = futures_result['status']
-    except (TypeError, KeyError):
-        if isinstance(futures_result, list):
-            futures_result = {'status': 'success', 'futures': futures_result, 'sectors': {}}
-        elif not isinstance(futures_result, dict):
-            futures_result = {'status': 'error', 'futures': [], 'sectors': {}}
-    if futures_result.get('status') == 'success':
-        prompt += "**美国期货板块趋势分析：**\n\n"
-        for sector_name, codes in futures_result['sectors'].items():
-            sector_futures = [f for f in futures_result['futures'] if f['sector'] == sector_name]
-            if not sector_futures:
-                continue
-            pct_changes = [f['pct'] for f in sector_futures]
-            avg_pct = sum(pct_changes) / len(pct_changes)
-            up_count = sum(1 for p in pct_changes if p > 0)
-            down_count = len(pct_changes) - up_count
-            if avg_pct > 1:
-                trend = '🟢 强势上涨'
-            elif avg_pct > 0:
-                trend = '🟡 温和上涨'
-            elif avg_pct > -1:
-                trend = '🟠 温和下跌'
-            else:
-                trend = '🔴 强势下跌'
-            prompt += f"**{sector_name}**: {trend} (平均{avg_pct:+.2f}%, 上涨{up_count}只/下跌{down_count}只)\n"
-            for f in sector_futures:
-                prompt += f"- {f['code']}: {f['price']:.2f} ({f['pct']:+.2f}%)\n"
+    if isinstance(futures_result, dict) and futures_result.get('status') == 'success':
+        futures_list = futures_result.get('futures', [])
+        if futures_list:
+            prompt += "**美国期货板块趋势分析：**\n\n"
+            for f in futures_list:
+                prompt += f"- {f.get('symbol', 'N/A')}: ${f.get('price', 0):.2f} ({f.get('change_pct', 0):+.2f}%)\n"
             prompt += "\n"
+        else:
+            prompt += "*期货数据暂无*\n"
     else:
-        prompt += "\n"
+        prompt += "*期货数据暂无*\n"
     
-        # 虚拟币数据
-        if crypto_data and crypto_data.get('status') == 'success' and crypto_data.get('coins'):
+    # 虚拟币数据
+    if crypto_data and crypto_data.get('status') == 'success' and crypto_data.get('coins'):
+        prompt += f"""
+【虚拟币数据】（来自Binance API，{timestamp} 获取）
+"""
+        for coin in crypto_data['coins'][:8]:
             prompt += f"""
-        【虚拟币数据】（来自Binance API，{date_info['timestamp']} 获取）
-        """
-            for coin in crypto_data['coins'][:8]:
-                prompt += f"""
-        {coin['name']}（{coin['symbol']}）
-        - 现价: ${coin['price']:,.2f}，24h涨跌幅: {coin['change_pct']:+.2f}%
-        - 今日最高: ${coin['high']:,.2f}，今日最低: ${coin['low']:,.2f}
-        - 24h交易量: {coin['volume']:,.0f} {coin['symbol']}
-        """
-        else:
-            prompt += "*虚拟币数据暂无*\n"
+{coin['name']}（{coin['symbol']}）
+- 现价: ${coin['price']:,.2f}，24h涨跌幅: {coin['change_pct']:+.2f}%
+- 今日最高: ${coin['high']:,.2f}，今日最低: ${coin['low']:,.2f}
+- 24h交易量: {coin['volume']:,.0f} {coin['symbol']}
+"""
+    else:
+        prompt += "*虚拟币数据暂无（需要代理）*\n"
     
-        # 财经新闻
-        if financial_news and financial_news.get('status') == 'success' and financial_news.get('news'):
-            prompt += f"""
-        【财经要闻】（来自东方财富，{date_info['timestamp']} 获取）
-        """
-            for i, news_item in enumerate(financial_news['news'][:10], 1):
-                prompt += f"{i}. {news_item['title']}\n"
-        else:
-            prompt += "*财经新闻暂无*\n"
+    # 财经新闻
+    if financial_news and financial_news.get('status') == 'success' and financial_news.get('news'):
+        prompt += f"""
+【财经要闻】（来自东方财富，{timestamp} 获取）
+"""
+        for i, news_item in enumerate(financial_news['news'][:10], 1):
+            prompt += f"{i}. {news_item['title']}\n"
+    else:
+        prompt += "*财经新闻暂无*\n"
+    
+    prompt += """
+【晨报要求】
+请生成一份专业的全球操盘晨报，**必须包含以下内容**：
+1. **隔夜重要信息**（美股收盘数据、汇率、大宗商品）
+2. **美国期货板块趋势概览**（⚠️ 必须详细展示上面提供的期货数据）
+3. **A股板块轮动分析**（基于成交额和涨跌幅）
+4. **今日入场/出场/试仓建议**（针对重点股票给出明确触发条件+仓位+止损止盈）
+5. **风险提示**
+- 入场条件（满足其中一项即触发）
+- 出场条件（满足其中一项即触发）
+- 试仓策略（仓位上限、试仓条件、止损价格、目标价格、盈亏比）
+- 风险提示）
+6. **今日重点关注板块**（A股+美股+期货+虚拟币板块）
+7. **财经要闻速览**（最重要的3-5条新闻及影响分析）
+8. **今日重要时间节点**（A股+美股交易时间）
 
-        prompt += """
-        【晨报要求】
-        请生成一份专业的全球操盘晨报，**必须包含以下内容**：
-        1. **隔夜重要信息**（美股收盘数据、汇率、大宗商品）
-        2. **美国期货板块趋势概览**（⚠️ 必须详细展示上面提供的期货板块趋势分析数据）
-        3. **虚拟币板块概览**（BTC/ETH等主流币价格、涨跌幅、市场情绪）
-        4. **集合竞价监测**（基于A股实时数据，对每只股票给出强弱判断）
-        5. **美股重点个股监测**（7-10只活跃股，包含SpaceX）
-        6. **今日操作策略**（A股+美股+期货+虚拟币，每只股票给出：
-        - 入场条件（满足其中一项即触发）
-        - 出场条件（满足其中一项即触发）
-        - 试仓策略（仓位上限、试仓条件、止损价格、目标价格、盈亏比）
-        - 风险提示）
-        7. **今日重点关注板块**（A股+美股+期货+虚拟币板块）
-        8. **财经要闻速览**（最重要的3-5条新闻及影响分析）
-        9. **今日重要时间节点**（A股+美股交易时间）
-
-        【格式要求】
+【格式要求】
 - 标题：📊 【活跃股操盘晨报】{current_date} {weekday}
 - 使用Emoji图标增强可读性
 - 每条建议都要有具体的价位和条件
@@ -553,53 +533,55 @@ def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futu
 
 # ========== 主流程 ==========
 
+# ========== 主流程 ==========
+
 def main():
     """CrewAI团队主流程"""
     print("=" * 60)
     print("🚀 [CrewAI团队] 开始独立实现活跃股操盘晨报系统")
-    print("   修复：使用实时数据 + 当天日期 + 真实新闻")
+    print("   数据源: SQLite数据库 + API降级")
     print("=" * 60)
     
     start_time = time.time()
     
-    # Step 1: 数据获取Agent
-    print("\n[Step 1] 数据获取Agent开始工作...")
-    date_info = get_current_date_info()
-    print(f"[CrewAI-数据获取Agent] 当前日期: {date_info['date_str']} {date_info['weekday']}")
+    # Step 1: 从统一数据源获取数据
+    print("\n[Step 1] 从SQLite数据库获取数据...")
+    from morning_data_source import MorningDataSource
+    source = MorningDataSource()
+    data = source.get_all_data()
+    source.close()
     
-    stocks = fetch_realtime_stocks()
-    if not stocks:
-        print("[CrewAI-数据获取Agent] ⚠️ 实时数据获取失败，降级使用缓存")
-        try:
-            with open(r"C:\Users\Pactera\stock_analysis.pkl", "rb") as f:
-                cached = pickle.load(f)
-            stocks = sorted(cached["top10"], key=lambda x: x.get("amount", 0), reverse=True)[:10]
-        except:
-            stocks = []
+    date_info = {
+        'date_str': data['date_str'],
+        'weekday': data['weekday'],
+        'timestamp': data['timestamp']
+    }
+    print(f"[CrewAI-数据获取] 当前日期: {date_info['date_str']} {date_info['weekday']}")
+    print(f"[CrewAI-数据获取] 美股: {len(data['us_stocks'])}只, A股: {len(data['a_stocks'])}只, 期货: {len(data['futures'])}只")
+    
+    # 转换数据格式
+    stocks = data['a_stocks']
+    us_stocks = data['us_stocks']
+    futures_list = data['futures']
+    crypto_data = {'status': 'success' if data['crypto'] else 'empty', 'coins': data['crypto']}
+    news_data = {'status': 'success' if data['news'] else 'empty', 'news': data['news']}
     
     # Step 2: 技术分析师
     print("\n[Step 2] 技术分析师开始工作...")
     indicators = calculate_indicators(stocks)
     
-    # Step 2.5: 获取美股数据
-    print("\n[Step 2.5] 获取美股数据...")
-    us_stocks = fetch_us_market_stocks()
+    # Step 2.5: 准备期货数据
+    print("\n[Step 2.5] 准备期货数据...")
+    futures_result = {"status": "success", "futures": futures_list, "sectors": {}}
+    for f in futures_list:
+        f['sector'] = 'commodity'
     
-    # Step 2.6: 获取期货数据
-    print("\n[Step 2.6] 获取美国期货数据...")
-    futures_result = fetch_us_futures_data()
-    # 缓存返回的是list，转换为dict格式
-    if isinstance(futures_result, list):
-        futures_result = {"status": "success", "futures": futures_result, "sectors": {}}
+    # Step 2.6: 虚拟币数据（当前环境不可用）
+    print("\n[Step 2.6] 虚拟币数据（当前环境不可用）...")
+    print(f"[CrewAI-虚拟币数据] 获取到 0 只虚拟币（需要代理）")
     
-    # Step 2.7: 获取虚拟币数据
-    print("\n[Step 2.7] 获取虚拟币数据...")
-    crypto_data = fetch_crypto_data()
-    print(f"[CrewAI-虚拟币数据] 获取到 {len(crypto_data.get('coins', []))} 只虚拟币")
-    
-    # Step 2.8: 获取财经新闻
-    print("\n[Step 2.8] 获取财经新闻...")
-    news_data = fetch_financial_news()
+    # Step 2.7: 财经新闻
+    print("\n[Step 2.7] 财经新闻...")
     print(f"[CrewAI-财经新闻] 获取到 {len(news_data.get('news', []))} 条新闻")
     
     # Step 3: 晨报撰稿人
