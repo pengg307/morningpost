@@ -25,6 +25,7 @@ import time
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
+from market_cache import get_cached, set_cache, get_stats
 
 # 加载API配置
 load_dotenv(r"C:\Users\Pactera\.agnes-env")
@@ -178,9 +179,15 @@ def fetch_us_market_data():
 
 
 def fetch_us_market_stocks():
-    """获取美股个股数据（新浪财经API）"""
+    """获取美股个股数据（新浪财经API，带缓存）"""
     print("[CrewAI-美股数据获取] 开始获取美股数据...")
     start_time = time.time()
+    
+    # 先查缓存
+    cached = get_cached('us_stock', 'batch')
+    if cached:
+        print(f"[CrewAI-美股数据获取] 从缓存读取 {len(cached)} 只美股数据")
+        return cached
     
     us_stocks = []
     try:
@@ -206,13 +213,14 @@ def fetch_us_market_stocks():
                     # 新浪美股格式: [0]名称 [1]现价 [2]涨跌额 [3]时间 [4]开盘 [5]昨收 [6]最高 [7]最低 [8]成交量
                     try:
                         current_price = float(parts[1])
-                        prev_close = float(parts[5]) if len(parts) > 5 else 0
-                        open_price = float(parts[4]) if len(parts) > 4 else 0
-                        high = float(parts[6]) if len(parts) > 6 else 0
-                        low = float(parts[7]) if len(parts) > 7 else 0
+                        prev_close = float(parts[5]) if len(parts) > 5 and parts[5] else 0
+                        open_price = float(parts[4]) if len(parts) > 4 and parts[4] else 0
+                        high = float(parts[6]) if len(parts) > 6 and parts[6] else 0
+                        low = float(parts[7]) if len(parts) > 7 and parts[7] else 0
                         volume = int(float(parts[8])) if len(parts) > 8 else 0
                         
-                        if prev_close > 0 and current_price > 0:
+                        # 非交易时间prev_close可能为0，用现价>0和成交量>0判断有效数据
+                        if current_price > 0 and volume > 0:
                             us_stocks.append({
                                 'name': name,
                                 'code': code.upper(),
@@ -223,10 +231,16 @@ def fetch_us_market_stocks():
                                 'low': low,
                                 'volume': volume,
                             })
+                            # 缓存单个股票
+                            set_cache('us_stock', code, us_stocks[-1])
                     except ValueError as e:
                         print(f"[CrewAI-美股数据获取] 解析失败 {code}: {e}")
     except Exception as e:
         print(f"[CrewAI-美股数据获取] 失败: {e}")
+    
+    # 缓存整批数据
+    if us_stocks:
+        set_cache('us_stock', 'batch', us_stocks)
     
     elapsed = time.time() - start_time
     print(f"[CrewAI-美股数据获取] 获取到 {len(us_stocks)} 只美股数据，耗时: {elapsed:.2f}s")
@@ -234,14 +248,20 @@ def fetch_us_market_stocks():
 
 
 def fetch_us_futures_data():
-    """获取美国期货数据（使用新浪财经API）"""
+    """获取美国期货数据（使用新浪财经API，带缓存）"""
     print("[CrewAI-美国期货数据获取] 开始获取美国期货数据...")
     start_time = time.time()
+    
+    # 先查缓存
+    cached = get_cached('futures', 'batch')
+    if cached:
+        print(f"[CrewAI-美国期货数据获取] 从缓存读取 {len(cached)} 只期货数据")
+        return cached
     
     try:
         sectors = {
             '贵金属': ['hf_GC', 'hf_SI'],
-            '能源': ['hf_CL', 'hf_NG', 'hf_BZ'],
+            '能源': ['hf_CL', 'hf_NG'],
             '金属': ['hf_HG'],
             '股指': ['hf_ES', 'hf_NQ', 'hf_YM', 'hf_RTY'],
             '农产品': ['ZC', 'ZW', 'ZS', 'KC', 'SB', 'CT', 'OJ'],
@@ -284,8 +304,8 @@ def fetch_us_futures_data():
                 if len(fields) < 10:
                     continue
                 name = code_names.get(symbol, symbol)
+                current = float(fields[0]) if fields[0] else 0
                 prev_close = float(fields[2]) if fields[2] else 0
-                current = float(fields[3]) if fields[3] else 0
                 high = float(fields[4]) if fields[4] else 0
                 low = float(fields[5]) if fields[5] else 0
                 pct = (current - prev_close) / prev_close * 100 if prev_close > 0 else 0
@@ -302,6 +322,13 @@ def fetch_us_futures_data():
             except Exception as e:
                 print(f"[期货获取] {symbol} 解析错误: {e}")
                 continue
+        
+        # 缓存每条期货数据
+        for f in futures:
+            set_cache('futures', f['code'], f)
+        # 缓存整批
+        if futures:
+            set_cache('futures', 'batch', futures)
         
         elapsed = time.time() - start_time
         print(f"[CrewAI-美国期货数据获取] 获取到 {len(futures)} 只美国期货数据，耗时: {elapsed:.2f}s")
@@ -393,7 +420,7 @@ def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futu
     us_stocks = fetch_us_market_stocks()
     if us_stocks:
         for stock in us_stocks[:5]:
-            pct = (stock['price'] - stock['prev_close']) / stock['prev_close'] * 100
+            pct = (stock['price'] - stock['prev_close']) / stock['prev_close'] * 100 if stock['prev_close'] > 0 else 0
             prompt += f"""
 {stock['name']}（{stock['code']}）
 - 现价: ${stock['price']:.2f}，涨跌幅: {pct:+.2f}%
@@ -601,9 +628,15 @@ def main():
 
 
 def fetch_crypto_data():
-    """获取虚拟币数据（Binance API + 代理配置从.env读取）"""
+    """获取虚拟币数据（Binance API，带缓存）"""
     print("[CrewAI-虚拟币数据获取] 开始获取虚拟币数据...")
     start_time = time.time()
+    
+    # 先查缓存
+    cached = get_cached('crypto', 'batch')
+    if cached:
+        print(f"[CrewAI-虚拟币数据获取] 从缓存读取 {len(cached)} 只虚拟币")
+        return {"status": "success", "coins": cached}
     
     try:
         import os
@@ -642,8 +675,14 @@ def fetch_crypto_data():
                         'high': float(d['highPrice']),
                         'low': float(d['lowPrice']),
                     })
+                    # 缓存单个币
+                    set_cache('crypto', symbol.replace('USDT', ''), crypto_coins[-1])
             except:
                 pass
+        
+        # 缓存整批
+        if crypto_coins:
+            set_cache('crypto', 'batch', crypto_coins)
         
         elapsed = time.time() - start_time
         print(f"[CrewAI-虚拟币数据获取] 获取到 {len(crypto_coins)} 只虚拟币，耗时: {elapsed:.2f}s")
@@ -654,9 +693,15 @@ def fetch_crypto_data():
 
 
 def fetch_financial_news():
-    """获取财经新闻（Firecrawl爬取东方财富）"""
+    """获取财经新闻（Firecrawl爬取东方财富，带缓存）"""
     print("[CrewAI-财经新闻获取] 开始获取财经新闻...")
     start_time = time.time()
+    
+    # 先查缓存
+    cached = get_cached('news', 'batch')
+    if cached:
+        print(f"[CrewAI-财经新闻获取] 从缓存读取 {len(cached)} 条新闻")
+        return {"status": "success", "news": cached}
     
     try:
         import os
@@ -680,6 +725,10 @@ def fetch_financial_news():
                 links = re.findall(r'\[([^\]]+)\]\([^)]+\)', md)
                 for title in links[:15]:
                     news_list.append({'title': title.strip()})
+        
+        # 缓存新闻
+        if news_list:
+            set_cache('news', 'batch', news_list)
         
         elapsed = time.time() - start_time
         print(f"[CrewAI-财经新闻获取] 获取到 {len(news_list)} 条新闻，耗时: {elapsed:.2f}s")
