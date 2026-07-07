@@ -29,40 +29,53 @@ BASE_URL = os.environ.get("AGNES_BASE_URL", "")
 MODEL = "agnes-2.0-flash"
 
 
-def fetch_futures_data():
-    """获取期货数据（新浪期货连续合约）"""
-    print("[合并晨报-期货数据获取] 开始获取期货数据...")
+def fetch_us_futures_data():
+    """获取美国期货数据（使用yfinance+代理10808）"""
+    print("[合并晨报-美国期货数据获取] 开始获取美国期货数据...")
     start_time = time.time()
     
     try:
-        futures_codes = ['AU0','AG0','CU0','AL0','ZN0','RB0','HC0','I0','JM0','J0','IF0','IC0','IH0','IM0']
-        url = f'https://hq.sinajs.cn/list={",".join(futures_codes)}'
-        headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers, timeout=15)
-        resp.encoding = 'gbk'
+        import os
+        # 设置代理（严格限定仅yfinance使用）
+        os.environ['http_proxy'] = 'http://127.0.0.1:10808'
+        os.environ['https_proxy'] = 'http://127.0.0.1:10808'
+        
+        import yfinance as yf
+        
+        # 美国期货板块分类
+        sectors = {
+            '贵金属': ['GC=F', 'SI=F', 'PL=F', 'PA=F'],
+            '能源': ['CL=F', 'NG=F', 'BZ=F'],
+            '金属': ['HG=F'],
+            '股指': ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'],
+            '农产品': ['ZC=F', 'ZW=F', 'ZS=F', 'KC=F', 'SB=F', 'CT=F', 'OJ=F'],
+            '畜牧': ['LE=F', 'HE=F']
+        }
         
         futures = []
-        for line in resp.text.strip().split('\n'):
-            if '=' in line:
-                data = line.split('"')[1] if '"' in line else ''
-                parts = data.split(',')
-                if len(parts) >= 28:
-                    futures.append({
-                        'name': parts[0],
-                        'prev_close': float(parts[19]),
-                        'open': float(parts[2]),
-                        'price': float(parts[3]),
-                        'high': float(parts[4]),
-                        'low': float(parts[5]),
-                        'volume': int(parts[13]) if len(parts) > 13 else 0
-                    })
+        for sector, codes in sectors.items():
+            for code in codes:
+                try:
+                    ticker = yf.Ticker(code)
+                    info = ticker.fast_info
+                    if hasattr(info, 'last_price') and info.last_price and hasattr(info, 'previous_close') and info.previous_close:
+                        pct = (info.last_price - info.previous_close) / info.previous_close * 100
+                        futures.append({
+                            'sector': sector,
+                            'code': code,
+                            'price': info.last_price,
+                            'prev_close': info.previous_close,
+                            'pct': pct
+                        })
+                except:
+                    pass
         
         elapsed = time.time() - start_time
-        print(f"[合并晨报-期货数据获取] 获取到 {len(futures)} 只期货数据，耗时: {elapsed:.2f}s")
-        return {"status": "success", "futures": futures}
+        print(f"[合并晨报-美国期货数据获取] 获取到 {len(futures)} 只美国期货数据，耗时: {elapsed:.2f}s")
+        return {"status": "success", "futures": futures, "sectors": sectors}
     except Exception as e:
-        print(f"[合并晨报-期货数据获取] 获取期货数据失败: {e}")
-        return {"status": "error", "futures": []}
+        print(f"[合并晨报-美国期货数据获取] 获取美国期货数据失败: {e}")
+        return {"status": "error", "futures": [], "sectors": {}}
 
 
 def get_current_date_info():
@@ -199,29 +212,52 @@ def generate_merged_report(a_stocks, us_stocks, date_info):
         pct = (stock['price'] - stock['prev_close']) / stock['prev_close'] * 100
         prompt += f"""
 {stock['name']}（{stock['code']}）
-- 现价: {stock['price']:.2f}美元，涨跌幅: {pct:+.2f}%
-- 今开: {stock['open']:.2f}美元，最高: {stock['high']:.2f}美元，最低: {stock['low']:.2f}美元
+- 现价: ${stock['price']:.2f}，涨跌幅: {pct:+.2f}%
+- 今开: ${stock['open']:.2f}，最高: ${stock['high']:.2f}，最低: ${stock['low']:.2f}
 - 成交量: {stock['volume']:,.0f}股
 """
 
-    prompt += f"""
-【期货数据】（来自新浪期货连续合约API，{date_info['timestamp']} 获取）
+    prompt += """
+【美国期货数据】（来自yfinance API，使用代理10808，{date_info['timestamp']} 获取）
 """
 
-    # 获取期货数据
-    futures_result = fetch_futures_data()
+    # 获取美国期货数据并进行板块分析
+    futures_result = fetch_us_futures_data()
+    
     if futures_result['status'] == 'success':
-        for fut in futures_result['futures'][:10]:
-            pct = (fut['price'] - fut['prev_close']) / fut['prev_close'] * 100
-            prompt += f"""
-{fut['name']}: 现价 {fut['price']:.2f}，涨跌幅 {pct:+.2f}%，今开 {fut['open']:.2f}，最高 {fut['high']:.2f}，最低 {fut['low']:.2f}，成交量 {fut['volume']:,}
-"""
-    prompt += f"""
-【合并晨报要求】
-请生成一份专业的全球晨报，包含以下内容：
+        prompt += "**美国期货板块趋势分析：**\n\n"
+        
+        for sector_name, codes in futures_result['sectors'].items():
+            sector_futures = [f for f in futures_result['futures'] if f['sector'] == sector_name]
+            if not sector_futures:
+                continue
+                
+            pct_changes = [f['pct'] for f in sector_futures]
+            avg_pct = sum(pct_changes) / len(pct_changes)
+            up_count = sum(1 for p in pct_changes if p > 0)
+            down_count = len(pct_changes) - up_count
+            
+            # 趋势判断
+            if avg_pct > 1:
+                trend = '🟢 强势上涨'
+            elif avg_pct > 0:
+                trend = '🟡 温和上涨'
+            elif avg_pct > -1:
+                trend = '🟠 温和下跌'
+            else:
+                trend = '🔴 强势下跌'
+                
+            prompt += f"**{sector_name}**: {trend} (平均{avg_pct:+.2f}%, 上涨{up_count}只/下跌{down_count}只)\n"
+            for f in sector_futures:
+                prompt += f"- {f['code']}: {f['price']:.2f} ({f['pct']:+.2f}%)\n"
+            prompt += "\n"
+    
+    prompt += """
+【合并晨报要求 - 重要】
+请生成一份专业的全球晨报，**必须包含以下所有内容**：
 
 1. **隔夜重要信息**（美股收盘数据、A50期指、汇率、大宗商品）
-2. **期货市场概览**（股指期货、商品期货表现）
+2. **期货市场板块趋势概览**（⚠️ 必须详细展示上面提供的美国期货板块趋势分析数据，包括每个板块的平均涨跌幅、上涨/下跌家数、领涨/领跌品种）
 3. **A股重点个股监测**（7-10只活跃股）
 4. **美股重点个股监测**（7-10只活跃股）
 5. **今日操作策略**（A股+美股+期货，每只股票给出：
@@ -229,7 +265,7 @@ def generate_merged_report(a_stocks, us_stocks, date_info):
    - 出场条件
    - 试仓策略（仓位上限、止损价格、目标价格、盈亏比）
    - 风险提示）
-6. **今日重点关注板块**（A股+美股+期货）
+6. **今日重点关注板块**（A股+美股+期货板块）
 7. **今日重要时间节点**（A股+美股交易时间）
 8. **免责声明**
 
@@ -240,6 +276,7 @@ def generate_merged_report(a_stocks, us_stocks, date_info):
 - 语气专业、客观、实用
 - 包含免责声明
 - 输出纯中文，适合微信阅读
+- ⚠️ 特别注意：期货板块趋势分析是晨报的核心内容之一，必须详细展示，不能省略
 """
 
     # 调用Agnes AI
