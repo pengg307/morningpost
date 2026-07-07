@@ -30,15 +30,21 @@ MODEL = "agnes-2.0-flash"
 
 
 def fetch_us_futures_data():
-    """获取美国期货数据（使用yfinance+代理10808）"""
+    """获取美国期货数据（使用yfinance，代理配置从.env读取）"""
     print("[合并晨报-美国期货数据获取] 开始获取美国期货数据...")
     start_time = time.time()
     
     try:
         import os
-        # 设置代理（严格限定仅yfinance使用）
-        os.environ['http_proxy'] = 'http://127.0.0.1:10808'
-        os.environ['https_proxy'] = 'http://127.0.0.1:10808'
+        from dotenv import load_dotenv
+        load_dotenv(r"C:\Users\Pactera\projects\morningpost\morningpost\.env")
+        
+        proxy_http = os.getenv('PROXY_HTTP', '')
+        proxy_https = os.getenv('PROXY_HTTPS', '')
+        
+        if proxy_http:
+            os.environ['http_proxy'] = proxy_http
+            os.environ['https_proxy'] = proxy_https
         
         import yfinance as yf
         
@@ -218,7 +224,7 @@ def generate_merged_report(a_stocks, us_stocks, date_info):
 """
 
     prompt += """
-【美国期货数据】（来自yfinance API，使用代理10808，{date_info['timestamp']} 获取）
+【美国期货数据】（来自yfinance API，代理配置从.env读取，{date_info['timestamp']} 获取）
 """
 
     # 获取美国期货数据并进行板块分析

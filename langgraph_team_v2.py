@@ -164,7 +164,7 @@ def fetch_us_market_stocks():
     
     us_stocks = []
     try:
-        symbols = 'gb_tsla,gb_aapl,gb_googl,gb_msft,gb_nvda,gb_amzn,gb_meta,gb_NFLX,gb_TSM,gb_INTC'
+        symbols = 'gb_tsla,gb_aapl,gb_googl,gb_msft,gb_nvda,gb_amzn,gb_meta,gb_NFLX,gb_TSM,gb_INTC,gb_SPACEX'
         url = f'https://hq.sinajs.cn/list={symbols}'
         headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, headers=headers, timeout=10)
@@ -173,7 +173,7 @@ def fetch_us_market_stocks():
         stock_names = {
             'tsla': '特斯拉', 'aapl': '苹果', 'googl': '谷歌', 'msft': '微软',
             'nvda': '英伟达', 'amzn': '亚马逊', 'meta': 'Meta', 'NFLX': '奈飞',
-            'TSM': '台积电', 'INTC': '英特尔'
+            'TSM': '台积电', 'INTC': '英特尔', 'SPACEX': 'SpaceX'
         }
         
         for line in resp.text.strip().split('\n'):
@@ -214,77 +214,67 @@ def fetch_us_market_stocks():
 
 
 def fetch_us_futures_data():
-    """获取美国期货数据（使用新浪财经API）"""
+    """获取美国期货数据（使用yfinance，代理配置从.env读取）"""
     print("[LangGraph-美国期货数据获取] 开始获取美国期货数据...")
     start_time = time.time()
     
     try:
-        import requests
+        import os
+        from dotenv import load_dotenv
+        load_dotenv(r"C:\Users\Pactera\projects\morningpost\morningpost\.env")
         
-        futures_map = {
-            '贵金属': ['hf_GC', 'hf_SI', 'hf_PL', 'hf_PA'],
-            '能源': ['hf_CL', 'hf_NG', 'hf_BZ'],
-            '金属': ['hf_HG'],
-            '股指': ['hf_ES', 'hf_NQ', 'hf_YM', 'hf_RT'],
-            '农产品': ['hf_ZC', 'hf_ZW', 'hf_ZS', 'hf_KC', 'hf_SB', 'hf_CT', 'hf_OJ'],
-            '畜牧': ['hf_LE', 'hf_HE']
+        proxy_http = os.getenv('PROXY_HTTP', '')
+        proxy_https = os.getenv('PROXY_HTTPS', '')
+        
+        if proxy_http:
+            os.environ['http_proxy'] = proxy_http
+            os.environ['https_proxy'] = proxy_https
+            
+        import yfinance as yf
+        
+        sectors = {
+            '贵金属': ['GC=F', 'SI=F', 'PL=F', 'PA=F'],
+            '能源': ['CL=F', 'NG=F', 'BZ=F'],
+            '金属': ['HG=F'],
+            '股指': ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'],
+            '农产品': ['ZC=F', 'ZW=F', 'ZS=F', 'KC=F', 'SB=F', 'CT=F', 'OJ=F'],
+            '畜牧': ['LE=F', 'HE=F']
         }
         
-        sector_names = {
-            'hf_GC': '黄金', 'hf_SI': '白银', 'hf_PL': '铂金', 'hf_PA': '钯金',
-            'hf_CL': '原油', 'hf_NG': '天然气', 'hf_BZ': '布伦特',
-            'hf_HG': '铜',
-            'hf_ES': '标普500', 'hf_NQ': '纳斯达克', 'hf_YM': '道琼斯', 'hf_RT': '罗素2000',
-            'hf_ZC': '玉米', 'hf_ZW': '小麦', 'hf_ZS': '大豆',
-            'hf_KC': '咖啡', 'hf_SB': '糖', 'hf_CT': '棉花', 'hf_OJ': '橙汁',
-            'hf_LE': '活牛', 'hf_HE': '瘦肉猪'
+        code_names = {
+            'GC=F': '黄金', 'SI=F': '白银', 'PL=F': '铂金', 'PA=F': '钯金',
+            'CL=F': '原油', 'NG=F': '天然气', 'BZ=F': '布伦特原油',
+            'HG=F': '铜',
+            'ES=F': '标普500', 'NQ=F': '纳斯达克', 'YM=F': '道琼斯', 'RTY=F': '罗素2000',
+            'ZC=F': '玉米', 'ZW=F': '小麦', 'ZS=F': '大豆',
+            'KC=F': '咖啡', 'SB=F': '糖', 'CT=F': '棉花', 'OJ=F': '橙汁',
+            'LE=F': '活牛', 'HE=F': '瘦肉猪'
         }
-        
-        all_symbols = []
-        for codes in futures_map.values():
-            all_symbols.extend(codes)
-        
-        url = f'https://hq.sinajs.cn/list={",".join(all_symbols)}'
-        headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.encoding = 'gbk'
         
         futures = []
-        for line in resp.text.strip().split('\n'):
-            if '=' in line:
-                code = line.split('_')[1].strip()
-                data = line.split('"')[1] if '"' in line else ''
-                parts = data.split(',')
-                if len(parts) >= 8:
-                    name = sector_names.get(code, code)
-                    price = float(parts[0]) if parts[0] else 0
-                    prev_settle = float(parts[7]) if len(parts) > 7 and parts[7] else 0
-                    curr_settle = float(parts[8]) if len(parts) > 8 and parts[8] else 0
-                    
-                    pct = 0
-                    if prev_settle > 0:
-                        pct = (curr_settle - prev_settle) / prev_settle * 100
-                    
-                    sector = ''
-                    for s, codes in futures_map.items():
-                        if code in codes:
-                            sector = s
-                            break
-                    
-                    if price > 0:
+        for sector, codes in sectors.items():
+            for code in codes:
+                try:
+                    ticker = yf.Ticker(code)
+                    info = ticker.fast_info
+                    if hasattr(info, 'last_price') and info.last_price and info.last_price > 0:
+                        price = info.last_price
+                        prev_close = info.previous_close if hasattr(info, 'previous_close') and info.previous_close else 0
+                        pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
                         futures.append({
                             'sector': sector,
                             'code': code,
-                            'name': name,
-                            'price': price,
-                            'prev_settle': prev_settle,
-                            'curr_settle': curr_settle,
-                            'pct': pct
+                            'name': code_names.get(code, code),
+                            'price': float(price),
+                            'prev_close': float(prev_close) if prev_close else 0,
+                            'pct': float(pct)
                         })
+                except:
+                    pass
         
         elapsed = time.time() - start_time
         print(f"[LangGraph-美国期货数据获取] 获取到 {len(futures)} 只美国期货数据，耗时: {elapsed:.2f}s")
-        return {"status": "success", "futures": futures, "sectors": futures_map}
+        return {"status": "success", "futures": futures, "sectors": sectors}
     except Exception as e:
         print(f"[LangGraph-美国期货数据获取] 失败: {e}")
         return {"status": "error", "futures": [], "sectors": {}}
