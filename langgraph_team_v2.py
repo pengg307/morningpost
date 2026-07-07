@@ -427,7 +427,15 @@ def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futu
 【美国期货数据】（来自yfinance API，{date_info['timestamp']} 获取）
 """
     futures_result = fetch_us_futures_data()
-    if futures_result['status'] == 'success':
+    # 缓存可能返回list，统一转换为dict
+    try:
+        _ = futures_result['status']
+    except (TypeError, KeyError):
+        if isinstance(futures_result, list):
+            futures_result = {'status': 'success', 'futures': futures_result, 'sectors': {}}
+        elif not isinstance(futures_result, dict):
+            futures_result = {'status': 'error', 'futures': [], 'sectors': {}}
+    if futures_result.get('status') == 'success':
         prompt += "**美国期货板块趋势分析：**\n\n"
         for sector_name, codes in futures_result['sectors'].items():
             sector_futures = [f for f in futures_result['futures'] if f['sector'] == sector_name]
@@ -573,6 +581,9 @@ def main():
     # Step 2.6: 获取期货数据
     print("\n[Step 2.6] 获取美国期货数据...")
     futures_result = fetch_us_futures_data()
+    # 缓存返回的是list，转换为dict格式
+    if isinstance(futures_result, list):
+        futures_result = {"status": "success", "futures": futures_result, "sectors": {}}
     
     # Step 2.7: 获取虚拟币数据
     print("\n[Step 2.7] 获取虚拟币数据...")
