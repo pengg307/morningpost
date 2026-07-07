@@ -169,10 +169,10 @@ def generate_merged_report(a_stocks, us_stocks, date_info):
 """
 
     prompt += f"""
-【期货数据】（来自新浪财经API，{date_info['timestamp']} 获取）
+【期货数据】（来自历史数据，{date_info['timestamp']} 获取）
 - 股指期货：IF（沪深300）、IC（中证500）、IH（上证50）、IM（中证1000）
 - 商品期货：黄金(AU)、白银(AG)、铜(CU)、铝(AL)、铁矿石(I)、螺纹钢(RB)
-- 若暂无实时数据，请基于隔夜收盘数据进行分析
+- 注：期货数据基于一周前收盘价，仅供参考
 
 【合并晨报要求】
 请生成一份专业的全球晨报，包含以下内容：
