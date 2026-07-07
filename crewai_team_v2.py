@@ -184,7 +184,7 @@ def fetch_us_market_stocks():
     
     us_stocks = []
     try:
-        symbols = 'gb_tsla,gb_aapl,gb_googl,gb_msft,gb_nvda,gb_amzn,gb_meta,gb_NFLX,gb_TSM,gb_INTC,gb_SPACEX'
+        symbols = 'gb_tsla,gb_aapl,gb_googl,gb_msft,gb_nvda,gb_amzn,gb_meta,gb_NFLX,gb_TSM,gb_INTC,gb_SPCX'
         url = f'https://hq.sinajs.cn/list={symbols}'
         headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
         resp = requests.get(url, headers=headers, timeout=10)
@@ -193,7 +193,7 @@ def fetch_us_market_stocks():
         stock_names = {
             'tsla': '特斯拉', 'aapl': '苹果', 'googl': '谷歌', 'msft': '微软',
             'nvda': '英伟达', 'amzn': '亚马逊', 'meta': 'Meta', 'NFLX': '奈飞',
-            'TSM': '台积电', 'INTC': '英特尔', 'SPACEX': 'SpaceX'
+            'TSM': '台积电', 'INTC': '英特尔', 'SPCX': 'SpaceX'
         }
         
         for line in resp.text.strip().split('\n'):
@@ -234,63 +234,74 @@ def fetch_us_market_stocks():
 
 
 def fetch_us_futures_data():
-    """获取美国期货数据（使用yfinance，代理配置从.env读取）"""
+    """获取美国期货数据（使用新浪财经API）"""
     print("[CrewAI-美国期货数据获取] 开始获取美国期货数据...")
     start_time = time.time()
     
     try:
-        import os
-        from dotenv import load_dotenv
-        load_dotenv(r"C:\Users\Pactera\projects\morningpost\morningpost\.env")
-        
-        proxy_http = os.getenv('PROXY_HTTP', '')
-        proxy_https = os.getenv('PROXY_HTTPS', '')
-        
-        if proxy_http:
-            os.environ['http_proxy'] = proxy_http
-            os.environ['https_proxy'] = proxy_https
-            
-        import yfinance as yf
-        
         sectors = {
-            '贵金属': ['GC=F', 'SI=F', 'PL=F', 'PA=F'],
-            '能源': ['CL=F', 'NG=F', 'BZ=F'],
-            '金属': ['HG=F'],
-            '股指': ['ES=F', 'NQ=F', 'YM=F', 'RTY=F'],
-            '农产品': ['ZC=F', 'ZW=F', 'ZS=F', 'KC=F', 'SB=F', 'CT=F', 'OJ=F'],
-            '畜牧': ['LE=F', 'HE=F']
+            '贵金属': ['hf_GC', 'hf_SI'],
+            '能源': ['hf_CL', 'hf_NG', 'hf_BZ'],
+            '金属': ['hf_HG'],
+            '股指': ['hf_ES', 'hf_NQ', 'hf_YM', 'hf_RTY'],
+            '农产品': ['ZC', 'ZW', 'ZS', 'KC', 'SB', 'CT', 'OJ'],
+            '畜牧': ['LE', 'HE']
         }
         
         code_names = {
-            'GC=F': '黄金', 'SI=F': '白银', 'PL=F': '铂金', 'PA=F': '钯金',
-            'CL=F': '原油', 'NG=F': '天然气', 'BZ=F': '布伦特原油',
-            'HG=F': '铜',
-            'ES=F': '标普500', 'NQ=F': '纳斯达克', 'YM=F': '道琼斯', 'RTY=F': '罗素2000',
-            'ZC=F': '玉米', 'ZW=F': '小麦', 'ZS=F': '大豆',
-            'KC=F': '咖啡', 'SB=F': '糖', 'CT=F': '棉花', 'OJ=F': '橙汁',
-            'LE=F': '活牛', 'HE=F': '瘦肉猪'
+            'hf_GC': '纽约黄金', 'hf_SI': '纽约白银',
+            'hf_CL': '纽约原油', 'hf_NG': '天然气', 'hf_BZ': '布伦特原油',
+            'hf_HG': '铜',
+            'hf_ES': '标普500', 'hf_NQ': '纳斯达克', 'hf_YM': '道琼斯', 'hf_RTY': '罗素2000',
+            'ZC': '玉米', 'ZW': '小麦', 'ZS': '大豆',
+            'KC': '咖啡', 'SB': '糖', 'CT': '棉花', 'OJ': '橙汁',
+            'LE': '活牛', 'HE': '瘦肉猪'
         }
         
+        # 构建新浪代码列表
+        all_codes = []
+        for codes in sectors.values():
+            all_codes.extend(codes)
+        
+        symbols = ','.join(all_codes)
+        url = f'https://hq.sinajs.cn/list={symbols}'
+        headers = {'Referer': 'https://finance.sina.com.cn/'}
+        resp = requests.get(url, headers=headers, timeout=15)
+        
         futures = []
-        for sector, codes in sectors.items():
-            for code in codes:
-                try:
-                    ticker = yf.Ticker(code)
-                    info = ticker.fast_info
-                    if hasattr(info, 'last_price') and info.last_price and info.last_price > 0:
-                        price = info.last_price
-                        prev_close = info.previous_close if hasattr(info, 'previous_close') and info.previous_close else 0
-                        pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
-                        futures.append({
-                            'sector': sector,
-                            'code': code,
-                            'name': code_names.get(code, code),
-                            'price': float(price),
-                            'prev_close': float(prev_close) if prev_close else 0,
-                            'pct': float(pct)
-                        })
-                except:
-                    pass
+        for line in resp.text.strip().split('\n'):
+            if not line.strip():
+                continue
+            try:
+                parts = line.split('=')
+                if len(parts) < 2:
+                    continue
+                symbol = parts[0].split('_')[-1].strip().rstrip('"')
+                data_str = parts[1].strip().strip('"').strip(';')
+                if not data_str:
+                    continue
+                fields = data_str.split(',')
+                if len(fields) < 10:
+                    continue
+                name = code_names.get(symbol, symbol)
+                prev_close = float(fields[2]) if fields[2] else 0
+                current = float(fields[3]) if fields[3] else 0
+                high = float(fields[4]) if fields[4] else 0
+                low = float(fields[5]) if fields[5] else 0
+                pct = (current - prev_close) / prev_close * 100 if prev_close > 0 else 0
+                futures.append({
+                    'sector': '未知',
+                    'code': symbol,
+                    'name': name,
+                    'price': current,
+                    'prev_close': prev_close,
+                    'high': high,
+                    'low': low,
+                    'pct': pct
+                })
+            except Exception as e:
+                print(f"[期货获取] {symbol} 解析错误: {e}")
+                continue
         
         elapsed = time.time() - start_time
         print(f"[CrewAI-美国期货数据获取] 获取到 {len(futures)} 只美国期货数据，耗时: {elapsed:.2f}s")
@@ -330,7 +341,7 @@ def calculate_indicators(stocks):
     return indicators
 
 
-def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futures_result):
+def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futures_result, crypto_data=None, financial_news=None):
     """晨报撰稿人Agent: 根据分析结果生成专业晨报"""
     print("[CrewAI-晨报撰稿人Agent] 开始生成晨报...")
     start_time = time.time()
@@ -419,24 +430,51 @@ def generate_morning_report(stocks, indicators, date_info, news, us_stocks, futu
                 prompt += f"- {f['code']}: {f['price']:.2f} ({f['pct']:+.2f}%)\n"
             prompt += "\n"
     else:
-        prompt += "*期货数据暂无*\n"
+        prompt += "\n"
+    
+        # 虚拟币数据
+        if crypto_data and crypto_data.get('status') == 'success' and crypto_data.get('coins'):
+            prompt += f"""
+        【虚拟币数据】（来自Binance API，{date_info['timestamp']} 获取）
+        """
+            for coin in crypto_data['coins'][:8]:
+                prompt += f"""
+        {coin['name']}（{coin['symbol']}）
+        - 现价: ${coin['price']:,.2f}，24h涨跌幅: {coin['change_pct']:+.2f}%
+        - 今日最高: ${coin['high']:,.2f}，今日最低: ${coin['low']:,.2f}
+        - 24h交易量: {coin['volume']:,.0f} {coin['symbol']}
+        """
+        else:
+            prompt += "*虚拟币数据暂无*\n"
+    
+        # 财经新闻
+        if financial_news and financial_news.get('status') == 'success' and financial_news.get('news'):
+            prompt += f"""
+        【财经要闻】（来自东方财富，{date_info['timestamp']} 获取）
+        """
+            for i, news_item in enumerate(financial_news['news'][:10], 1):
+                prompt += f"{i}. {news_item['title']}\n"
+        else:
+            prompt += "*财经新闻暂无*\n"
 
-    prompt += """
-【晨报要求】
-请生成一份专业的全球操盘晨报，**必须包含以下内容**：
-1. **隔夜重要信息**（美股收盘数据、汇率、大宗商品）
-2. **美国期货板块趋势概览**（⚠️ 必须详细展示上面提供的期货板块趋势分析数据）
-3. **集合竞价监测**（基于A股实时数据，对每只股票给出强弱判断）
-4. **美股重点个股监测**（7-10只活跃股）
-5. **今日操作策略**（A股+美股+期货，每只股票给出：
-   - 入场条件（满足其中一项即触发）
-   - 出场条件（满足其中一项即触发）
-   - 试仓策略（仓位上限、试仓条件、止损价格、目标价格、盈亏比）
-   - 风险提示）
-6. **今日重点关注板块**（A股+美股+期货板块）
-7. **今日重要时间节点**（A股+美股交易时间）
+        prompt += """
+        【晨报要求】
+        请生成一份专业的全球操盘晨报，**必须包含以下内容**：
+        1. **隔夜重要信息**（美股收盘数据、汇率、大宗商品）
+        2. **美国期货板块趋势概览**（⚠️ 必须详细展示上面提供的期货板块趋势分析数据）
+        3. **虚拟币板块概览**（BTC/ETH等主流币价格、涨跌幅、市场情绪）
+        4. **集合竞价监测**（基于A股实时数据，对每只股票给出强弱判断）
+        5. **美股重点个股监测**（7-10只活跃股，包含SpaceX）
+        6. **今日操作策略**（A股+美股+期货+虚拟币，每只股票给出：
+        - 入场条件（满足其中一项即触发）
+        - 出场条件（满足其中一项即触发）
+        - 试仓策略（仓位上限、试仓条件、止损价格、目标价格、盈亏比）
+        - 风险提示）
+        7. **今日重点关注板块**（A股+美股+期货+虚拟币板块）
+        8. **财经要闻速览**（最重要的3-5条新闻及影响分析）
+        9. **今日重要时间节点**（A股+美股交易时间）
 
-【格式要求】
+        【格式要求】
 - 标题：📊 【活跃股操盘晨报】{current_date} {weekday}
 - 使用Emoji图标增强可读性
 - 每条建议都要有具体的价位和条件
@@ -516,9 +554,19 @@ def main():
     print("\n[Step 2.6] 获取美国期货数据...")
     futures_result = fetch_us_futures_data()
     
+    # Step 2.7: 获取虚拟币数据
+    print("\n[Step 2.7] 获取虚拟币数据...")
+    crypto_data = fetch_crypto_data()
+    print(f"[CrewAI-虚拟币数据] 获取到 {len(crypto_data.get('coins', []))} 只虚拟币")
+    
+    # Step 2.8: 获取财经新闻
+    print("\n[Step 2.8] 获取财经新闻...")
+    news_data = fetch_financial_news()
+    print(f"[CrewAI-财经新闻] 获取到 {len(news_data.get('news', []))} 条新闻")
+    
     # Step 3: 晨报撰稿人
     print("\n[Step 3] 晨报撰稿人开始工作...")
-    report = generate_morning_report(stocks, indicators, date_info, [], us_stocks, futures_result)
+    report = generate_morning_report(stocks, indicators, date_info, [], us_stocks, futures_result, crypto_data, news_data)
     
     total_elapsed = time.time() - start_time
     
@@ -550,6 +598,95 @@ def main():
     print(f"\n📄 CrewAI晨报内容:\n{report}")
     
     return output
+
+
+def fetch_crypto_data():
+    """获取虚拟币数据（Binance API + 代理配置从.env读取）"""
+    print("[CrewAI-虚拟币数据获取] 开始获取虚拟币数据...")
+    start_time = time.time()
+    
+    try:
+        import os
+        from dotenv import load_dotenv
+        load_dotenv(r"C:\Users\Pactera\projects\morningpost\morningpost\.env")
+        
+        proxy_http = os.getenv('PROXY_HTTP', '')
+        proxy_https = os.getenv('PROXY_HTTPS', '')
+        
+        proxies = {}
+        if proxy_http:
+            proxies = {'http': proxy_http, 'https': proxy_http}
+        
+        import requests
+        
+        coins = [
+            ('BTCUSDT', '比特币'), ('ETHUSDT', '以太坊'), ('SOLUSDT', 'Solana'),
+            ('BNBUSDT', 'BNB'), ('XRPUSDT', '瑞波'), ('ADAUSDT', '卡尔达诺'),
+            ('DOGEUSDT', '狗狗币'), ('AVAXUSDT', '阿瓦隆'), ('DOTUSDT', '波卡'),
+            ('LINKUSDT', 'Chainlink')
+        ]
+        
+        crypto_coins = []
+        for symbol, name in coins:
+            try:
+                r = requests.get(f'https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}',
+                               proxies=proxies, timeout=10)
+                if r.status_code == 200:
+                    d = r.json()
+                    crypto_coins.append({
+                        'name': name,
+                        'symbol': symbol.replace('USDT', ''),
+                        'price': float(d['lastPrice']),
+                        'change_pct': float(d['priceChangePercent']),
+                        'volume': float(d['volume']),
+                        'high': float(d['highPrice']),
+                        'low': float(d['lowPrice']),
+                    })
+            except:
+                pass
+        
+        elapsed = time.time() - start_time
+        print(f"[CrewAI-虚拟币数据获取] 获取到 {len(crypto_coins)} 只虚拟币，耗时: {elapsed:.2f}s")
+        return {"status": "success", "coins": crypto_coins}
+    except Exception as e:
+        print(f"[CrewAI-虚拟币数据获取] 失败: {e}")
+        return {"status": "error", "coins": []}
+
+
+def fetch_financial_news():
+    """获取财经新闻（Firecrawl爬取东方财富）"""
+    print("[CrewAI-财经新闻获取] 开始获取财经新闻...")
+    start_time = time.time()
+    
+    try:
+        import os
+        api_key = os.getenv('FIRECRAWL_API_KEY', 'fc-2cfaf0f135704287981c5db4509e3f6a')
+        
+        import requests
+        
+        r = requests.post(
+            'https://api.firecrawl.dev/v1/scrape',
+            json={'url': 'https://finance.eastmoney.com/', 'formats': ['markdown']},
+            headers={'Authorization': f'Bearer {api_key}'},
+            timeout=30
+        )
+        
+        news_list = []
+        if r.status_code == 200:
+            d = r.json()
+            if d.get('success'):
+                md = d['data'].get('markdown', '')
+                import re
+                links = re.findall(r'\[([^\]]+)\]\([^)]+\)', md)
+                for title in links[:15]:
+                    news_list.append({'title': title.strip()})
+        
+        elapsed = time.time() - start_time
+        print(f"[CrewAI-财经新闻获取] 获取到 {len(news_list)} 条新闻，耗时: {elapsed:.2f}s")
+        return {"status": "success", "news": news_list}
+    except Exception as e:
+        print(f"[CrewAI-财经新闻获取] 失败: {e}")
+        return {"status": "error", "news": []}
 
 
 if __name__ == "__main__":
