@@ -1,70 +1,120 @@
 """
-数据获取管理器 - 完整架构设计
-1. 原始数据表 (raw_data) - 永不删除，记录每次获取
-2. 规整数据表 (clean_data) - 去重、合并、取最优
-3. 数据源健康表 (source_health) - 记录代理使用情况
+市场数据获取管理器 - 使用新数据库架构
+- asset_class_id: 外键引用asset_classes表
+- source_id: 外键引用data_sources表
+- proxy_used: 0/1布尔值
 """
 import sqlite3
 import json
 import os
-from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+import time
+import logging
 import configparser
+from datetime import datetime, timedelta
+from typing import Dict, List, Any, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 class DataAcquisitionManager:
-    """数据获取管理器"""
+    """市场数据获取管理器"""
     
     def __init__(self, db_path: str = None):
         if db_path is None:
             db_path = os.path.join(os.path.dirname(__file__), 'data', 'market_data.db')
         self.db_path = db_path
-        self.config = self._load_config()
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self.conn = sqlite3.connect(db_path)
+        self.conn.row_factory = sqlite3.Row
         self._create_tables()
+        self.config = self._load_config()
         
     def _load_config(self):
-        """加载配置文件"""
         config_path = os.path.join(os.path.dirname(__file__), 'data_source_config.ini')
         config = configparser.ConfigParser()
         config.read(config_path, encoding='utf-8')
         return config
         
     def _create_tables(self):
-        """创建数据库表"""
         cursor = self.conn.cursor()
         
-        # 1. 原始数据表 - 记录每次获取的所有数据
+        # 1. 资产类别表
         cursor.execute('''
-            CREATE TABLE IF NOT EXISTS raw_data (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,          -- 股票代码
-                data_type TEXT NOT NULL,       -- us_stock/futures/crypto/a_stock
-                source TEXT NOT NULL,          -- sina/yahoo/binance/tencent等
-                price REAL,                    -- 价格
-                prev_close REAL,               -- 昨收
-                open_price REAL,               -- 开盘
-                high REAL,                     -- 最高
-                low REAL,                      -- 最低
-                volume REAL,                   -- 成交量
-                change_pct REAL,               -- 涨跌幅
-                market_cap REAL,               -- 市值
-                pe_ratio REAL,                 -- 市盈率
-                pb_ratio REAL,                 -- 市净率
-                turnover_rate REAL,            -- 换手率
-                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,  -- 获取时间
-                proxy_used INTEGER DEFAULT 0,  -- 是否使用代理
-                status TEXT DEFAULT 'success', -- success/error/limited
-                raw_json TEXT,                 -- 原始JSON数据
-                retry_count INTEGER DEFAULT 0  -- 重试次数
+            CREATE TABLE IF NOT EXISTS asset_classes (
+                id INTEGER PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT
             )
         ''')
         
-        # 2. 规整数据表 - 去重后的可用数据
+        # 插入枚举值
+        for row in [
+            (1, 'us_stock', '美股', '美国股票市场'),
+            (2, 'a_stock', 'A股', '中国A股市场'),
+            (3, 'futures', '期货', '商品/金融期货合约'),
+            (4, 'crypto', '加密货币', '数字货币')
+        ]:
+            cursor.execute('INSERT OR IGNORE INTO asset_classes VALUES (?, ?, ?, ?)', row)
+            
+        # 2. 数据源表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS data_sources (
+                id INTEGER PRIMARY KEY,
+                code TEXT UNIQUE NOT NULL,
+                name TEXT NOT NULL,
+                category TEXT,
+                need_proxy INTEGER DEFAULT 0,
+                reliability REAL DEFAULT 1.0
+            )
+        ''')
+        
+        for row in [
+            (1, 'sina', '新浪财经', 'stock/futures', 0, 0.95),
+            (2, 'tencent', '腾讯行情', 'stock', 0, 0.95),
+            (3, 'eastmoney', '东方财富', 'stock', 0, 0.90),
+            (4, 'yahoo', 'Yahoo Finance', 'stock/futures', 1, 0.85),
+            (5, 'yfinance', 'yfinance', 'futures', 1, 0.80),
+            (6, 'binance', 'Binance', 'crypto', 1, 0.90),
+            (7, 'coinbase', 'Coinbase', 'crypto', 0, 0.85),
+            (8, 'firecrawl', 'Firecrawl', 'news', 0, 0.80)
+        ]:
+            cursor.execute('INSERT OR IGNORE INTO data_sources VALUES (?, ?, ?, ?, ?, ?)', row)
+            
+        # 3. 原始数据表
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS raw_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                asset_class_id INTEGER NOT NULL,
+                source_id INTEGER NOT NULL,
+                price REAL,
+                prev_close REAL,
+                open_price REAL,
+                high REAL,
+                low REAL,
+                volume REAL,
+                change_pct REAL,
+                market_cap REAL,
+                pe_ratio REAL,
+                pb_ratio REAL,
+                turnover_rate REAL,
+                timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+                proxy_used INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'success',
+                raw_json TEXT,
+                retry_count INTEGER DEFAULT 0,
+                FOREIGN KEY (asset_class_id) REFERENCES asset_classes(id),
+                FOREIGN KEY (source_id) REFERENCES data_sources(id)
+            )
+        ''')
+        
+        # 4. 规整数据表
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS clean_data (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 symbol TEXT NOT NULL UNIQUE,
-                data_type TEXT NOT NULL,
+                asset_class_id INTEGER NOT NULL,
+                best_source_id INTEGER NOT NULL,
                 latest_price REAL,
                 prev_close REAL,
                 open_price REAL,
@@ -76,52 +126,55 @@ class DataAcquisitionManager:
                 pe_ratio REAL,
                 pb_ratio REAL,
                 turnover_rate REAL,
-                best_source TEXT,              -- 最优数据源
                 last_updated DATETIME,
-                data_quality_score REAL        -- 数据质量评分
+                data_quality_score REAL,
+                FOREIGN KEY (asset_class_id) REFERENCES asset_classes(id),
+                FOREIGN KEY (best_source_id) REFERENCES data_sources(id)
             )
         ''')
         
-        # 3. 数据源健康表 - 记录每个数据源的可用性
+        # 5. 数据源健康表
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS source_health (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT NOT NULL,          -- 数据源名称
-                data_type TEXT NOT NULL,       -- 数据类型
+                source_id INTEGER NOT NULL,
                 last_success DATETIME,
                 last_fail DATETIME,
                 success_count INTEGER DEFAULT 0,
                 fail_count INTEGER DEFAULT 0,
-                proxy_needed INTEGER DEFAULT 0,
-                rate_limited INTEGER DEFAULT 0,
-                health_score REAL              -- 健康度评分
+                proxy_usage_count INTEGER DEFAULT 0,
+                rate_limited_count INTEGER DEFAULT 0,
+                health_score REAL DEFAULT 1.0,
+                FOREIGN KEY (source_id) REFERENCES data_sources(id)
             )
         ''')
         
-        # 4. 通知日志表 - 记录代理使用和通知
+        # 6. 通知日志表
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS notification_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                level TEXT,                    -- info/warning/error
+                level TEXT,
                 message TEXT,
                 proxy_used INTEGER DEFAULT 0,
-                source TEXT,
-                data_type TEXT
+                source_id INTEGER,
+                asset_class_id INTEGER,
+                FOREIGN KEY (source_id) REFERENCES data_sources(id),
+                FOREIGN KEY (asset_class_id) REFERENCES asset_classes(id)
             )
         ''')
         
         self.conn.commit()
         
-    def acquire_raw_data(self, symbol: str, data_type: str, sources: List[str], 
+    def acquire_raw_data(self, symbol: str, asset_class_id: int, source_ids: List[int], 
                         max_retries: int = 3) -> Dict[str, Any]:
         """
         获取原始数据 - 多渠道获取，失败重试
         
         Args:
             symbol: 股票代码
-            data_type: 数据类型 (us_stock/futures/crypto/a_stock)
-            sources: 数据源列表
+            asset_class_id: 资产类别ID (1=美股, 2=A股, 3=期货, 4=加密货币)
+            source_ids: 数据源ID列表
             max_retries: 最大重试次数
             
         Returns:
@@ -129,21 +182,30 @@ class DataAcquisitionManager:
         """
         results = {}
         
-        for source in sources:
+        for source_id in source_ids:
             retry_count = 0
             while retry_count < max_retries:
                 try:
-                    # 检查是否需要代理
-                    need_proxy = self._check_proxy_required(source, data_type)
+                    # 获取数据源信息
+                    cursor = self.conn.cursor()
+                    cursor.execute("SELECT * FROM data_sources WHERE id = ?", (source_id,))
+                    source_info = cursor.fetchone()
+                    
+                    if not source_info:
+                        results[str(source_id)] = {'status': 'failed', 'error': 'Source not found'}
+                        break
+                        
+                    # 判断是否需要代理
+                    need_proxy = bool(source_info['need_proxy'])
                     
                     # 获取数据
-                    data = self._fetch_from_source(symbol, data_type, source, use_proxy=need_proxy)
+                    data = self._fetch_from_source(symbol, asset_class_id, source_info['code'], use_proxy=need_proxy)
                     
                     if data:
                         # 存入原始数据表
-                        self._save_raw_data(symbol, data_type, source, data, use_proxy=need_proxy)
-                        results[source] = {'status': 'success', 'data': data}
-                        self._update_source_health(source, data_type, success=True)
+                        self._save_raw_data(symbol, asset_class_id, source_id, data, use_proxy=need_proxy)
+                        results[str(source_id)] = {'status': 'success', 'data': data}
+                        self._update_source_health(source_id, success=True, proxy_used=need_proxy)
                         break
                     else:
                         raise Exception("No data returned")
@@ -151,233 +213,447 @@ class DataAcquisitionManager:
                 except Exception as e:
                     retry_count += 1
                     if retry_count >= max_retries:
-                        results[source] = {'status': 'failed', 'error': str(e)}
-                        self._update_source_health(source, data_type, success=False)
-                        self._send_notification(f"数据获取失败: {symbol} ({source})", level='error')
+                        results[str(source_id)] = {'status': 'failed', 'error': str(e)}
+                        self._update_source_health(source_id, success=False)
+                        self._send_notification(f"数据获取失败: {symbol} (source_id={source_id})", 
+                                             level='error', source_id=source_id)
                     else:
-                        # 重试前等待
-                        import time
                         time.sleep(2 ** retry_count)  # 指数退避
                         
         return results
         
-    def _check_proxy_required(self, source: str, data_type: str) -> bool:
-        """
-        检查是否需要代理 - 能不用则不用
-        
-        Returns:
-            True: 需要代理, False: 不需要代理
-        """
-        # 从配置读取
-        proxy_config = self.config.get('proxy_config', fallback={})
-        
-        # 默认策略：大多数国内数据源不需要代理
-        no_proxy_sources = {
-            'sina', 'tencent', 'eastmoney', 'firecrawl', 'coinbase'
-        }
-        
-        # 需要代理的数据源
-        proxy_sources = {
-            'yahoo', 'binance'  # 某些地区需要代理访问
-        }
-        
-        # 优先尝试不使用代理
-        if source in no_proxy_sources:
-            return False
-        elif source in proxy_sources:
-            # 先尝试不用代理，失败后再用代理
-            return False  # 总是先尝试不用代理
-            
-        return False
-        
-    def _fetch_from_source(self, symbol: str, data_type: str, source: str, 
+    def _fetch_from_source(self, symbol: str, asset_class_id: int, source_code: str, 
                           use_proxy: bool = False) -> Optional[Dict]:
-        """
-        从指定数据源获取数据
-        
-        Returns:
-            数据字典，失败返回None
-        """
-        # 根据数据类型和数据源选择获取函数
-        fetch_func = self._get_fetch_function(data_type, source)
-        if not fetch_func:
-            return None
-            
+        """从指定数据源获取数据"""
         try:
-            # 如果有代理，设置代理
-            if use_proxy:
-                proxy = self._get_proxy()
-            else:
-                proxy = None
-                
-            # 获取数据
-            data = fetch_func(symbol, proxy=proxy)
-            return data
-            
+            if asset_class_id == 1:  # 美股
+                return self._fetch_us_stock(symbol, source_code, use_proxy)
+            elif asset_class_id == 2:  # A股
+                return self._fetch_a_stock(symbol, source_code, use_proxy)
+            elif asset_class_id == 3:  # 期货
+                return self._fetch_futures(symbol, source_code, use_proxy)
+            elif asset_class_id == 4:  # 加密货币
+                return self._fetch_crypto(symbol, source_code, use_proxy)
         except Exception as e:
-            # 如果不用代理失败了，尝试用代理
-            if not use_proxy:
-                try:
-                    proxy = self._get_proxy()
-                    data = fetch_func(symbol, proxy=proxy)
-                    self._log_notification(f"使用代理获取成功: {symbol} ({source})", 
-                                         level='info', proxy_used=True)
-                    return data
-                except Exception as e2:
-                    self._log_notification(f"代理也失败: {symbol} ({source}): {e2}", 
-                                         level='warning', proxy_used=True)
-                    return None
+            logger.error(f"Fetch error for {symbol} ({source_code}): {e}")
+        return None
+        
+    def _fetch_us_stock(self, symbol: str, source: str, use_proxy: bool) -> Optional[Dict]:
+        """获取美股数据"""
+        import requests
+        
+        try:
+            if source == 'sina':
+                url = f'https://hq.sinajs.cn/list=gb_{symbol.lower()}'
+                headers = {'Referer': 'https://finance.sina.com.cn'}
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200 and len(r.text) > 50:
+                    return self._parse_sina_us_stock(r.text)
+                    
+            elif source == 'yahoo':
+                # Yahoo需要代理，简化处理
+                pass
+                
+        except Exception as e:
+            logger.error(f"Sina US stock fetch error: {e}")
+            
+        return None
+        
+    def _parse_sina_us_stock(self, text: str) -> Optional[Dict]:
+        """解析新浪美股数据"""
+        try:
+            # var hq_str_gb_tsla="特斯拉,407.0250,-3.04,..."
+            start = text.find('="') + 2
+            end = text.find('"', start)
+            if start < 2 or end < 0:
+                return None
+                
+            parts = text[start:end].split(',')
+            if len(parts) < 9:
+                return None
+                
+            current_price = float(parts[1])
+            prev_close = float(parts[5]) if parts[5] else 0
+            open_price = float(parts[4]) if parts[4] else 0
+            high = float(parts[6]) if parts[6] else 0
+            low = float(parts[7]) if parts[7] else 0
+            volume = float(parts[8]) if parts[8] else 0
+            
+            return {
+                'price': current_price,
+                'prev_close': prev_close,
+                'open_price': open_price,
+                'high': high,
+                'low': low,
+                'volume': volume,
+                'change_pct': ((current_price - prev_close) / prev_close * 100) if prev_close > 0 else 0,
+                'name': parts[0]
+            }
+        except Exception as e:
+            logger.error(f"Parse error: {e}")
             return None
             
-    def _get_fetch_function(self, data_type: str, source: str):
-        """获取对应的数据获取函数"""
-        # 映射关系
-        fetch_functions = {
-            ('us_stock', 'sina'): self._fetch_us_stock_sina,
-            ('us_stock', 'yahoo'): self._fetch_us_stock_yahoo,
-            ('futures', 'sina'): self._fetch_futures_sina,
-            ('futures', 'yfinance'): self._fetch_futures_yfinance,
-            ('crypto', 'binance'): self._fetch_crypto_binance,
-            ('crypto', 'coinbase'): self._fetch_crypto_coinbase,
-            ('a_stock', 'tencent'): self._fetch_a_stock_tencent,
-            ('a_stock', 'sina'): self._fetch_a_stock_sina,
-            ('a_stock', 'eastmoney'): self._fetch_a_stock_eastmoney,
-        }
+    def _fetch_a_stock(self, symbol: str, source: str, use_proxy: bool) -> Optional[Dict]:
+        """获取A股数据"""
+        import requests
         
-        return fetch_functions.get((data_type, source))
+        try:
+            if source == 'tencent':
+                # 添加市场前缀
+                if symbol.startswith(('6', '9')):
+                    market = 'sh'
+                else:
+                    market = 'sz'
+                url = f'https://qt.gtimg.cn/q={market}{symbol}'
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200 and len(r.text) > 50:
+                    return self._parse_tencent_a_stock(r.text)
+                    
+            elif source == 'sina':
+                url = f'https://hq.sinajs.cn/list=sh{symbol}' if symbol.startswith('6') else f'https://hq.sinajs.cn/list=sz{symbol}'
+                headers = {'Referer': 'https://finance.sina.com.cn'}
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200 and len(r.text) > 50:
+                    return self._parse_sina_a_stock(r.text)
+                    
+        except Exception as e:
+            logger.error(f"A stock fetch error: {e}")
+            
+        return None
         
-    def _save_raw_data(self, symbol: str, data_type: str, source: str, 
+    def _parse_tencent_a_stock(self, text: str) -> Optional[Dict]:
+        """解析腾讯A股数据"""
+        try:
+            # 腾讯格式: v_sh000300="1~沪深300指数~000300~3958.37~..."
+            start = text.find('="') + 2
+            end = text.find(';', start)
+            if start < 2 or end < 0:
+                return None
+                
+            parts = text[start:end].split('~')
+            if len(parts) < 35:
+                return None
+                
+            return {
+                'price': float(parts[3]),
+                'prev_close': float(parts[4]),
+                'open_price': float(parts[5]),
+                'high': float(parts[33]),
+                'low': float(parts[34]),
+                'volume': float(parts[6]),
+                'change_pct': float(parts[31]),
+                'turnover_rate': float(parts[37]) if len(parts) > 37 else 0,
+                'name': parts[1]
+            }
+        except Exception as e:
+            logger.error(f"Tencent parse error: {e}")
+            return None
+            
+    def _parse_sina_a_stock(self, text: str) -> Optional[Dict]:
+        """解析新浪A股数据"""
+        try:
+            start = text.find('="') + 2
+            end = text.find('"', start)
+            if start < 2 or end < 0:
+                return None
+                
+            parts = text[start:end].split(',')
+            if len(parts) < 35:
+                return None
+                
+            return {
+                'price': float(parts[3]),
+                'prev_close': float(parts[4]),
+                'open_price': float(parts[1]),
+                'high': float(parts[33]),
+                'low': float(parts[34]),
+                'volume': float(parts[8]),
+                'change_pct': float(parts[31]),
+                'turnover_rate': float(parts[37]) if len(parts) > 37 else 0,
+                'name': parts[0].split('_')[-1]
+            }
+        except Exception as e:
+            logger.error(f"Sina A stock parse error: {e}")
+            return None
+            
+    def _fetch_futures(self, symbol: str, source: str, use_proxy: bool) -> Optional[Dict]:
+        """获取期货数据"""
+        import requests
+        
+        try:
+            if source == 'sina':
+                url = f'https://hq.sinajs.cn/list=hf_{symbol}'
+                headers = {'Referer': 'https://finance.sina.com.cn'}
+                r = requests.get(url, headers=headers, timeout=10)
+                if r.status_code == 200 and len(r.text) > 50:
+                    return self._parse_sina_futures(r.text)
+                    
+        except Exception as e:
+            logger.error(f"Futures fetch error: {e}")
+            
+        return None
+        
+    def _parse_sina_futures(self, text: str) -> Optional[Dict]:
+        """解析新浪期货数据"""
+        try:
+            start = text.find('="') + 2
+            end = text.find('"', start)
+            if start < 2 or end < 0:
+                return None
+                
+            parts = text[start:end].split(',')
+            if len(parts) < 10:
+                return None
+                
+            # hf_GC: [0]现价 [1]空 [2]昨收 [3]今开 [4]最高 [5]最低 [6]时间 ...
+            return {
+                'price': float(parts[0]) if parts[0] else 0,
+                'prev_close': float(parts[2]) if parts[2] else 0,
+                'open_price': float(parts[3]) if parts[3] else 0,
+                'high': float(parts[4]) if parts[4] else 0,
+                'low': float(parts[5]) if parts[5] else 0,
+                'name': parts[9] if len(parts) > 9 else symbol
+            }
+        except Exception as e:
+            logger.error(f"Futures parse error: {e}")
+            return None
+            
+    def _fetch_crypto(self, symbol: str, source: str, use_proxy: bool) -> Optional[Dict]:
+        """获取加密货币数据"""
+        import requests
+        
+        try:
+            if source == 'coinbase':
+                url = f'https://api.coinbase.com/apis/v2/prices/{symbol}-USD/spot'
+                r = requests.get(url, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    return {
+                        'price': float(data['data']['amount']),
+                        'name': data['data']['base']
+                    }
+                    
+        except Exception as e:
+            logger.error(f"Crypto fetch error: {e}")
+            
+        return None
+        
+    def _save_raw_data(self, symbol: str, asset_class_id: int, source_id: int, 
                       data: Dict, use_proxy: bool = False):
         """保存原始数据到数据库"""
         cursor = self.conn.cursor()
         
         cursor.execute('''
             INSERT INTO raw_data 
-            (symbol, data_type, source, price, prev_close, open_price, high, low, 
+            (symbol, asset_class_id, source_id, price, prev_close, open_price, high, low, 
              volume, change_pct, market_cap, pe_ratio, pb_ratio, turnover_rate,
              proxy_used, status, raw_json, retry_count)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', ?, 0)
         ''', (
-            symbol, data_type, source,
+            symbol, asset_class_id, source_id,
             data.get('price'), data.get('prev_close'), data.get('open_price'),
             data.get('high'), data.get('low'), data.get('volume'),
             data.get('change_pct'), data.get('market_cap'), data.get('pe_ratio'),
             data.get('pb_ratio'), data.get('turnover_rate'),
             1 if use_proxy else 0,
-            json.dumps(data, ensure_ascii=False)
+            json.dumps(data, ensure_ascii=False, default=str)
         ))
         
         self.conn.commit()
         
     def consolidate_data(self):
-        """
-        数据规整 - 从原始数据生成规整数据
-        策略：取最新、最准确的数据源
-        """
+        """数据规整 - 从raw_data生成clean_data"""
         cursor = self.conn.cursor()
         
         # 获取所有symbol
-        cursor.execute('SELECT DISTINCT symbol, data_type FROM raw_data')
+        cursor.execute('''
+            SELECT DISTINCT symbol, asset_class_id FROM raw_data WHERE status = 'success'
+        ''')
         symbols = cursor.fetchall()
         
-        for symbol, data_type in symbols:
-            # 获取该symbol的所有数据源
+        for sym_row in symbols:
+            symbol = sym_row['symbol']
+            asset_class_id = sym_row['asset_class_id']
+            
+            # 获取该symbol的所有成功数据
             cursor.execute('''
-                SELECT source, timestamp, raw_json, proxy_used 
-                FROM raw_data 
-                WHERE symbol = ? AND data_type = ? AND status = 'success'
-                ORDER BY timestamp DESC
-            ''', (symbol, data_type))
+                SELECT rd.*, ds.reliability, ds.need_proxy
+                FROM raw_data rd
+                JOIN data_sources ds ON rd.source_id = ds.id
+                WHERE rd.symbol = ? AND rd.asset_class_id = ? AND rd.status = 'success'
+                ORDER BY rd.timestamp DESC
+            ''', (symbol, asset_class_id))
             
             rows = cursor.fetchall()
             if not rows:
                 continue
                 
-            # 选择最优数据源（优先不用代理的，最新的）
-            best_source = None
-            best_data = None
+            # 选择最优数据源
+            best_row = None
+            best_score = 0
             
             for row in rows:
-                source, timestamp, raw_json, proxy_used = row
-                data = json.loads(raw_json)
-                
-                # 选择标准：不用代理 > 用代理，最新数据
-                if best_source is None or (proxy_used == 0 and best_data.get('proxy_used', 1) == 1):
-                    best_source = source
-                    best_data = data
+                score = self._calculate_quality_score(row)
+                if score > best_score:
+                    best_score = score
+                    best_row = row
                     
-            if best_data:
-                # 插入或更新规整数据
+            if best_row:
+                # 插入或更新clean_data
                 cursor.execute('''
                     INSERT OR REPLACE INTO clean_data 
-                    (symbol, data_type, latest_price, prev_close, open_price, high, low,
+                    (symbol, asset_class_id, best_source_id, latest_price, prev_close, open_price, high, low,
                      volume, change_pct, market_cap, pe_ratio, pb_ratio, turnover_rate,
-                     best_source, last_updated, data_quality_score)
+                     last_updated, data_quality_score)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    symbol, data_type,
-                    best_data.get('price'), best_data.get('prev_close'), 
-                    best_data.get('open_price'), best_data.get('high'), best_data.get('low'),
-                    best_data.get('volume'), best_data.get('change_pct'),
-                    best_data.get('market_cap'), best_data.get('pe_ratio'),
-                    best_data.get('pb_ratio'), best_data.get('turnover_rate'),
-                    best_source, datetime.now(), 1.0  # 质量评分满分
+                    symbol, asset_class_id, best_row['source_id'],
+                    best_row['price'], best_row['prev_close'], best_row['open_price'],
+                    best_row['high'], best_row['low'], best_row['volume'],
+                    best_row['change_pct'], best_row['market_cap'], best_row['pe_ratio'],
+                    best_row['pb_ratio'], best_row['turnover_rate'],
+                    datetime.now(), best_score
                 ))
+                
+                # 更新source_health
+                self._update_source_health(best_row['source_id'], success=True, adopted=True)
                 
         self.conn.commit()
         
-    def _update_source_health(self, source: str, data_type: str, success: bool):
+    def _calculate_quality_score(self, row) -> float:
+        """
+        计算数据质量评分 (0-1.0)
+        
+        评分标准:
+        - 数据完整性 (0.4): 必填字段是否都有
+        - 数据源可靠性 (0.3): 从data_sources表的reliability读取
+        - 数据新鲜度 (0.2): 获取时间越近分数越高
+        - 数据一致性 (0.1): 与其他数据源的一致性
+        """
+        score = 0.0
+        
+        # 转换为字典
+        row_dict = dict(row)
+        
+        # 1. 数据完整性 (0-0.4)
+        required_fields = ['price', 'volume', 'change_pct']
+        present_fields = sum(1 for f in required_fields if row_dict.get(f) is not None and row_dict[f] != 0)
+        score += (present_fields / len(required_fields)) * 0.4
+        
+        # 2. 数据源可靠性 (0-0.3)
+        score += row_dict['reliability'] * 0.3
+        
+        # 3. 数据新鲜度 (0-0.2)
+        if row_dict['timestamp']:
+            try:
+                ts = row_dict['timestamp'].replace('Z', '+00:00')
+                hours_since = (datetime.now() - datetime.fromisoformat(ts)).total_seconds() / 3600
+                if hours_since <= 1:
+                    score += 0.2
+                elif hours_since <= 6:
+                    score += 0.15
+                elif hours_since <= 24:
+                    score += 0.1
+                else:
+                    score += 0.05
+            except:
+                score += 0.05
+                
+        # 4. 数据一致性 (0-0.1) - 简化处理
+        score += 0.1  # 默认满分
+        
+        return min(score, 1.0)
+        
+    def _update_source_health(self, source_id: int, success: bool, proxy_used: bool = False, adopted: bool = False):
         """更新数据源健康状态"""
         cursor = self.conn.cursor()
         
         if success:
             cursor.execute('''
                 UPDATE source_health 
-                SET last_success = ?, success_count = success_count + 1, health_score = MIN(health_score + 0.1, 1.0)
-                WHERE source = ? AND data_type = ?
-            ''', (datetime.now(), source, data_type))
+                SET last_success = ?, success_count = success_count + 1, 
+                    health_score = MIN(health_score + 0.01, 1.0)
+                WHERE source_id = ?
+            ''', (datetime.now(), source_id))
+            
+            if proxy_used:
+                cursor.execute('''
+                    UPDATE source_health 
+                    SET proxy_usage_count = proxy_usage_count + 1
+                    WHERE source_id = ?
+                ''', (source_id,))
+                
+            if adopted:
+                cursor.execute('''
+                    INSERT OR IGNORE INTO source_health (source_id) VALUES (?)
+                ''', (source_id,))
         else:
             cursor.execute('''
                 UPDATE source_health 
-                SET last_fail = ?, fail_count = fail_count + 1, rate_limited = rate_limited + 1, health_score = MAX(health_score - 0.1, 0.0)
-                WHERE source = ? AND data_type = ?
-            ''', (datetime.now(), source, data_type))
-                
+                SET last_fail = ?, fail_count = fail_count + 1, 
+                    health_score = MAX(health_score - 0.01, 0.0)
+                WHERE source_id = ?
+            ''', (datetime.now(), source_id))
+            
         self.conn.commit()
         
     def _send_notification(self, message: str, level: str = 'info', 
-                          proxy_used: bool = False, source: str = None, data_type: str = None):
-        """发送通知（微信/Hermes）"""
-        # 记录到通知日志表
+                          source_id: int = None, asset_class_id: int = None, proxy_used: bool = False):
+        """发送通知"""
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO notification_log (level, message, proxy_used, source, data_type)
+            INSERT INTO notification_log (level, message, proxy_used, source_id, asset_class_id)
             VALUES (?, ?, ?, ?, ?)
-        ''', (level, message, 1 if proxy_used else 0, source, data_type))
+        ''', (level, message, 1 if proxy_used else 0, source_id, asset_class_id))
         self.conn.commit()
         
         # 如果是error级别，发送微信通知
         if level == 'error':
-            # 这里可以集成Hermes微信通知
             print(f"[NOTIFICATION] {level.upper()}: {message}")
             
-    def _log_notification(self, message: str, level: str = 'info', proxy_used: bool = False):
-        """记录通知日志"""
-        self._send_notification(message, level, proxy_used)
-        
-    def get_clean_data(self, data_type: str = None) -> List[Dict]:
+    def get_clean_data(self, asset_class_id: int = None) -> List[Dict]:
         """获取规整后的数据"""
         cursor = self.conn.cursor()
         
-        if data_type:
-            cursor.execute('SELECT * FROM clean_data WHERE data_type = ?', (data_type,))
+        if asset_class_id:
+            cursor.execute('''
+                SELECT cd.*, ac.name as asset_class_name, ds.name as source_name
+                FROM clean_data cd
+                JOIN asset_classes ac ON cd.asset_class_id = ac.id
+                JOIN data_sources ds ON cd.best_source_id = ds.id
+                WHERE cd.asset_class_id = ?
+                ORDER BY ac.id, cd.symbol
+            ''', (asset_class_id,))
         else:
-            cursor.execute('SELECT * FROM clean_data')
+            cursor.execute('''
+                SELECT cd.*, ac.name as asset_class_name, ds.name as source_name
+                FROM clean_data cd
+                JOIN asset_classes ac ON cd.asset_class_id = ac.id
+                JOIN data_sources ds ON cd.best_source_id = ds.id
+                ORDER BY ac.id, cd.symbol
+            ''')
             
-        columns = [description[0] for description in cursor.description]
-        rows = cursor.fetchall()
+        return [dict(row) for row in cursor.fetchall()]
         
-        return [dict(zip(columns, row)) for row in rows]
+    def get_stats(self) -> Dict:
+        """获取缓存统计"""
+        cursor = self.conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM raw_data")
+        raw_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM clean_data")
+        clean_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT symbol) FROM clean_data")
+        unique_symbols = cursor.fetchone()[0]
+        
+        return {
+            'raw_data_count': raw_count,
+            'clean_data_count': clean_count,
+            'unique_symbols': unique_symbols,
+            'categories': {}
+        }
         
     def close(self):
         """关闭数据库连接"""
