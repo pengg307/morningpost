@@ -29,6 +29,42 @@ BASE_URL = os.environ.get("AGNES_BASE_URL", "")
 MODEL = "agnes-2.0-flash"
 
 
+def fetch_futures_data():
+    """获取期货数据（新浪期货连续合约）"""
+    print("[合并晨报-期货数据获取] 开始获取期货数据...")
+    start_time = time.time()
+    
+    try:
+        futures_codes = ['AU0','AG0','CU0','AL0','ZN0','RB0','HC0','I0','JM0','J0','IF0','IC0','IH0','IM0']
+        url = f'https://hq.sinajs.cn/list={",".join(futures_codes)}'
+        headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.encoding = 'gbk'
+        
+        futures = []
+        for line in resp.text.strip().split('\n'):
+            if '=' in line:
+                data = line.split('"')[1] if '"' in line else ''
+                parts = data.split(',')
+                if len(parts) >= 28:
+                    futures.append({
+                        'name': parts[0],
+                        'prev_close': float(parts[19]),
+                        'open': float(parts[2]),
+                        'price': float(parts[3]),
+                        'high': float(parts[4]),
+                        'low': float(parts[5]),
+                        'volume': int(parts[13]) if len(parts) > 13 else 0
+                    })
+        
+        elapsed = time.time() - start_time
+        print(f"[合并晨报-期货数据获取] 获取到 {len(futures)} 只期货数据，耗时: {elapsed:.2f}s")
+        return {"status": "success", "futures": futures}
+    except Exception as e:
+        print(f"[合并晨报-期货数据获取] 获取期货数据失败: {e}")
+        return {"status": "error", "futures": []}
+
+
 def get_current_date_info():
     """获取当前日期信息"""
     now = datetime.now()
@@ -169,11 +205,18 @@ def generate_merged_report(a_stocks, us_stocks, date_info):
 """
 
     prompt += f"""
-【期货数据】（来自历史数据，{date_info['timestamp']} 获取）
-- 股指期货：IF（沪深300）、IC（中证500）、IH（上证50）、IM（中证1000）
-- 商品期货：黄金(AU)、白银(AG)、铜(CU)、铝(AL)、铁矿石(I)、螺纹钢(RB)
-- 注：期货数据基于一周前收盘价，仅供参考
+【期货数据】（来自新浪期货连续合约API，{date_info['timestamp']} 获取）
+"""
 
+    # 获取期货数据
+    futures_result = fetch_futures_data()
+    if futures_result['status'] == 'success':
+        for fut in futures_result['futures'][:10]:
+            pct = (fut['price'] - fut['prev_close']) / fut['prev_close'] * 100
+            prompt += f"""
+{fut['name']}: 现价 {fut['price']:.2f}，涨跌幅 {pct:+.2f}%，今开 {fut['open']:.2f}，最高 {fut['high']:.2f}，最低 {fut['low']:.2f}，成交量 {fut['volume']:,}
+"""
+    prompt += f"""
 【合并晨报要求】
 请生成一份专业的全球晨报，包含以下内容：
 
