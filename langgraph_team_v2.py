@@ -23,7 +23,10 @@ import requests
 from datetime import datetime
 from typing import TypedDict, Dict, Any, List
 from dotenv import load_dotenv
-from langgraph.graph import StateGraph, START, END
+try:
+    from langgraph.graph import StateGraph, START, END
+except ImportError:
+    StateGraph = None  # LangGraph未安装时跳过
 from market_cache import get_cached, set_cache, get_stats
 
 # 加载API配置
@@ -32,6 +35,11 @@ load_dotenv(r"C:\Users\Pactera\.agnes-env")
 API_KEY = os.environ.get("AGNES_API_KEY", "")
 BASE_URL = os.environ.get("AGNES_BASE_URL", "")
 MODEL = "agnes-2.0-flash"
+
+# ========== 新增：模型使用开关 ==========
+# 设置为 True 时使用 LLM 生成报告（较慢但更丰富）
+# 设置为 False 时使用纯模板生成（极快，不消耗 token）
+USE_LLM = False
 
 
 # ========== 辅助函数（与CrewAI一致）==========
@@ -46,86 +54,27 @@ def get_current_date_info():
 
 
 def fetch_realtime_stocks():
-    """数据提取节点: 从腾讯API和新浪API获取实时股票数据"""
+    """数据提取节点: 统一使用morning_data_source获取全量数据"""
     print("[LangGraph-data_extraction] 开始获取实时数据...")
     start_time = time.time()
     
-    # 腾讯API获取基本面数据
-    codes = ['sh300308','sz000725','sh301308','sh300502','sz001309','sz002384','sh688525','sh688008','sh688256','sz300223']
-    url = f'http://qt.gtimg.cn/q={",".join(codes)}'
+    # 统一使用morning_data_source.py获取全量数据
+    from morning_data_source import MorningDataSource
+    source = MorningDataSource()
+    data = source.get_all_data()
+    source.close()
     
-    stocks = []
-    try:
-        resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
-        resp.encoding = 'gbk'
-        
-        for line in resp.text.strip().split('\n'):
-            if '~' in line:
-                parts = line.split('~')
-                if len(parts) > 49:
-                    code = parts[2]
-                    stocks.append({
-                        'name': parts[1],
-                        'code': code,
-                        'price': float(parts[3]) if parts[3] else 0,
-                        'prev_close': float(parts[4]) if parts[4] else 0,
-                        'open': float(parts[5]) if parts[5] else 0,
-                        'high': float(parts[33]) if len(parts) > 33 and parts[33] else 0,
-                        'low': float(parts[34]) if len(parts) > 34 and parts[34] else 0,
-                        'volume': float(parts[6]) if parts[6] else 0,
-                        'amount': float(parts[37]) if len(parts) > 37 else 0,
-                        'turnover_rate': float(parts[38]) if len(parts) > 38 else 0,
-                        'pe': float(parts[39]) if len(parts) > 39 and parts[39] else 0,
-                        'pb': float(parts[40]) if len(parts) > 40 and parts[40] else 0,
-                        'ttm': float(parts[41]) if len(parts) > 41 and parts[41] else 0,
-                        'market_value': float(parts[42]) if len(parts) > 42 and parts[42] else 0,
-                        'circulating_value': float(parts[43]) if len(parts) > 43 and parts[43] else 0,
-                    })
-        print(f"[LangGraph-data_extraction] 腾讯API获取到 {len(stocks)} 只股票数据")
-    except Exception as e:
-        print(f"[LangGraph-data_extraction] 腾讯API失败: {e}")
+    a_stocks = data.get('a_stocks', [])
+    us_stocks = data.get('us_stocks', [])
+    futures = data.get('futures', [])
     
-    # 如果腾讯API失败，使用新浪API
-    if not stocks:
-        print("[LangGraph-data_extraction] 腾讯API失败，降级使用新浪API...")
-        sina_symbols = [f'sz{c}' for c in codes]
-        url = f'https://hq.sinajs.cn/list={",".join(sina_symbols)}'
-        headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
-        
-        try:
-            resp = requests.get(url, headers=headers, timeout=15)
-            resp.encoding = 'gbk'
-            
-            for line in resp.text.strip().split('\n'):
-                if '=' in line:
-                    data = line.split('"')[1] if '"' in line else ''
-                    parts = data.split(',')
-                    if len(parts) >= 32:
-                        code = parts[0].split('_')[-1].lstrip('szsh')
-                        stocks.append({
-                            'name': parts[1],
-                            'code': code,
-                            'price': float(parts[3]),
-                            'prev_close': float(parts[2]),
-                            'open': float(parts[3]),
-                            'high': float(parts[4]),
-                            'low': float(parts[5]),
-                            'volume': 0,
-                            'amount': float(parts[8]),
-                            'turnover_rate': 0,
-                            'pe': 0,
-                            'pb': 0,
-                            'ttm': 0,
-                            'market_value': 0,
-                            'circulating_value': 0,
-                        })
-            print(f"[LangGraph-data_extraction] 新浪API获取到 {len(stocks)} 只股票数据")
-        except Exception as e:
-            print(f"[LangGraph-data_extraction] 新浪API也失败: {e}")
+    elapsed = time.time() - start_time
+    print(f"[LangGraph-data_extraction] 获取到 A股:{len(a_stocks)} 只, 美股:{len(us_stocks)} 只, 期货:{len(futures)} 只, 耗时: {elapsed:.2f}s")
+    return {'a_stocks': a_stocks, 'us_stocks': us_stocks, 'futures': futures, 'all_data': data}
     
     elapsed = time.time() - start_time
     print(f"[LangGraph-data_extraction] 数据获取完成，耗时: {elapsed:.2f}s")
-    return stocks
+    return {'a_stocks': a_stocks, 'us_stocks': us_stocks, 'futures': futures, 'all_data': data}
 
 
 def calculate_indicators(stocks):
@@ -135,22 +84,25 @@ def calculate_indicators(stocks):
     
     indicators = {}
     for stock in stocks:
-        code = stock["code"]
+        code = stock.get("symbol", stock.get("code", ""))
         price = stock.get("price", 0)
         prev_close = stock.get("prev_close", 0)
+        volume = stock.get("volume", 0)
+        turnover = stock.get("turnover", 0)
         
         if prev_close > 0:
             pct = (price - prev_close) / prev_close * 100
         else:
             pct = 0
         
+        amount_yi = turnover / 100000000 if turnover else 0
+        
         indicators[code] = {
             "pct": pct,
-            "pe": stock.get("pe", 0),
-            "pb": stock.get("pb", 0),
-            "market_value": stock.get("market_value", 0),
-            "turnover_rate": stock.get("turnover_rate", 0),
-            "amount_yi": stock.get("amount", 0) / 10000,  # 转换为亿元
+            "price": price,
+            "volume": volume,
+            "turnover": turnover,
+            "amount_yi": amount_yi,
         }
     
     elapsed = time.time() - start_time
@@ -159,158 +111,40 @@ def calculate_indicators(stocks):
 
 
 def fetch_us_market_stocks():
-    """获取美股个股数据（新浪财经API，带缓存）"""
+    """美股数据：统一从morning_data_source.py获取"""
     print("[LangGraph-美股数据获取] 开始获取美股数据...")
     start_time = time.time()
     
-    # 先查缓存
-    cached = get_cached('us_stock', 'batch')
-    if cached:
-        print(f"[LangGraph-美股数据获取] 从缓存读取 {len(cached)} 只美股数据")
-        return cached
-    
-    us_stocks = []
     try:
-        symbols = 'gb_tsla,gb_aapl,gb_googl,gb_msft,gb_nvda,gb_amzn,gb_meta,gb_NFLX,gb_TSM,gb_INTC,gb_SPCX'
-        url = f'https://hq.sinajs.cn/list={symbols}'
-        headers = {'Referer': 'https://finance.sina.com.cn/', 'User-Agent': 'Mozilla/5.0'}
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.encoding = 'gbk'
+        from morning_data_source import MorningDataSource
+        source = MorningDataSource()
+        data = source.get_all_data()
+        source.close()
         
-        stock_names = {
-            'tsla': '特斯拉', 'aapl': '苹果', 'googl': '谷歌', 'msft': '微软',
-            'nvda': '英伟达', 'amzn': '亚马逊', 'meta': 'Meta', 'NFLX': '奈飞',
-            'TSM': '台积电', 'INTC': '英特尔', 'SPCX': 'SpaceX'
-        }
-        
-        for line in resp.text.strip().split('\n'):
-            if '=' in line:
-                data = line.split('"')[1] if '"' in line else ''
-                parts = data.split(',')
-                if len(parts) >= 3:
-                    code = line.split('=')[0].split('_')[-1].strip().rstrip('"').lower()
-                    name = stock_names.get(code, code)
-                    # 新浪美股格式: [0]名称 [1]现价 [2]涨跌额 [3]时间 [4]开盘 [5]昨收 [6]最高 [7]最低 [8]成交量
-                    try:
-                        current_price = float(parts[1])
-                        prev_close = float(parts[5]) if len(parts) > 5 and parts[5] else 0
-                        open_price = float(parts[4]) if len(parts) > 4 and parts[4] else 0
-                        high = float(parts[6]) if len(parts) > 6 and parts[6] else 0
-                        low = float(parts[7]) if len(parts) > 7 and parts[7] else 0
-                        volume = int(float(parts[8])) if len(parts) > 8 else 0
-                        
-                        # 非交易时间prev_close可能为0，用现价>0和成交量>0判断有效数据
-                        if current_price > 0 and volume > 0:
-                            us_stocks.append({
-                                'name': name,
-                                'code': code.upper(),
-                                'price': current_price,
-                                'prev_close': prev_close,
-                                'open': open_price,
-                                'high': high,
-                                'low': low,
-                                'volume': volume,
-                            })
-                    except ValueError as e:
-                        print(f"[LangGraph-美股数据获取] 解析失败 {code}: {e}")
+        us_stocks = data.get('us_stocks', [])
+        elapsed = time.time() - start_time
+        print(f"[LangGraph-美股数据获取] 获取到 {len(us_stocks)} 只美股数据，耗时: {elapsed:.2f}s")
+        return us_stocks
     except Exception as e:
         print(f"[LangGraph-美股数据获取] 失败: {e}")
-    
-    # 缓存
-    if us_stocks:
-        for s in us_stocks:
-            set_cache('us_stock', s['code'].lower(), s)
-        set_cache('us_stock', 'batch', us_stocks)
-    
-    elapsed = time.time() - start_time
-    print(f"[LangGraph-美股数据获取] 获取到 {len(us_stocks)} 只美股数据，耗时: {elapsed:.2f}s")
-    return us_stocks
+        return []
 
 
 def fetch_us_futures_data():
-    """获取美国期货数据（使用新浪财经API，带缓存）"""
+    """期货数据：统一从morning_data_source.py获取"""
     print("[LangGraph-美国期货数据获取] 开始获取美国期货数据...")
     start_time = time.time()
     
-    # 先查缓存
-    cached = get_cached('futures', 'batch')
-    if cached:
-        print(f"[LangGraph-美国期货数据获取] 从缓存读取 {len(cached)} 只期货数据")
-        return cached
-    
     try:
-        sectors = {
-            '贵金属': ['hf_GC', 'hf_SI'],
-            '能源': ['hf_CL', 'hf_NG'],
-            '金属': ['hf_HG'],
-            '股指': ['hf_ES', 'hf_NQ', 'hf_YM', 'hf_RTY'],
-            '农产品': ['ZC', 'ZW', 'ZS', 'KC', 'SB', 'CT', 'OJ'],
-            '畜牧': ['LE', 'HE']
-        }
+        from morning_data_source import MorningDataSource
+        source = MorningDataSource()
+        data = source.get_all_data()
+        source.close()
         
-        code_names = {
-            'hf_GC': '纽约黄金', 'hf_SI': '纽约白银',
-            'hf_CL': '纽约原油', 'hf_NG': '天然气', 'hf_BZ': '布伦特原油',
-            'hf_HG': '铜',
-            'hf_ES': '标普500', 'hf_NQ': '纳斯达克', 'hf_YM': '道琼斯', 'hf_RTY': '罗素2000',
-            'ZC': '玉米', 'ZW': '小麦', 'ZS': '大豆',
-            'KC': '咖啡', 'SB': '糖', 'CT': '棉花', 'OJ': '橙汁',
-            'LE': '活牛', 'HE': '瘦肉猪'
-        }
-        
-        all_codes = []
-        for codes in sectors.values():
-            all_codes.extend(codes)
-        
-        symbols = ','.join(all_codes)
-        url = f'https://hq.sinajs.cn/list={symbols}'
-        headers = {'Referer': 'https://finance.sina.com.cn/'}
-        resp = requests.get(url, headers=headers, timeout=15)
-        
-        futures = []
-        for line in resp.text.strip().split('\n'):
-            if not line.strip():
-                continue
-            try:
-                parts = line.split('=')
-                if len(parts) < 2:
-                    continue
-                symbol = parts[0].split('_')[-1].strip().rstrip('"')
-                data_str = parts[1].strip().strip('"').strip(';')
-                if not data_str:
-                    continue
-                fields = data_str.split(',')
-                if len(fields) < 10:
-                    continue
-                name = code_names.get(symbol, symbol)
-                current = float(fields[0]) if fields[0] else 0
-                prev_close = float(fields[2]) if fields[2] else 0
-                high = float(fields[4]) if fields[4] else 0
-                low = float(fields[5]) if fields[5] else 0
-                pct = (current - prev_close) / prev_close * 100 if prev_close > 0 else 0
-                futures.append({
-                    'sector': '未知',
-                    'code': symbol,
-                    'name': name,
-                    'price': current,
-                    'prev_close': prev_close,
-                    'high': high,
-                    'low': low,
-                    'pct': pct
-                })
-            except Exception as e:
-                print(f"[期货获取] {symbol} 解析错误: {e}")
-                continue
-        
-        # 缓存
-        for f in futures:
-            set_cache('futures', f['code'], f)
-        if futures:
-            set_cache('futures', 'batch', futures)
-        
+        futures = data.get('futures', [])
         elapsed = time.time() - start_time
-        print(f"[LangGraph-美国期货数据获取] 获取到 {len(futures)} 只美国期货数据，耗时: {elapsed:.2f}s")
-        return {"status": "success", "futures": futures, "sectors": sectors}
+        print(f"[LangGraph-美国期货数据获取] 获取到 {len(futures)} 只期货数据，耗时: {elapsed:.2f}s")
+        return {"status": "success", "futures": futures, "sectors": {}}
     except Exception as e:
         print(f"[LangGraph-美国期货数据获取] 失败: {e}")
         return {"status": "error", "futures": [], "sectors": {}}
@@ -321,7 +155,7 @@ def signal_detection(stocks, indicators):
     print("[LangGraph-signal_detection] 开始信号检测...")
     signals = []
     for stock in stocks:
-        code = stock["code"]
+        code = stock.get("symbol", stock.get("code", ""))
         ind = indicators.get(code, {})
         score = 0
         reasons = []
@@ -350,7 +184,7 @@ def signal_detection(stocks, indicators):
         
         signals.append({
             "code": code,
-            "name": stock["name"],
+            "name": stock.get("name", code),
             "score": score,
             "signal_type": stype,
             "reasons": reasons if reasons else ["无明显信号"]
@@ -360,15 +194,410 @@ def signal_detection(stocks, indicators):
     return signals
 
 
-def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futures_result=None, crypto_data=None, financial_news=None):
+def build_template_report(stocks, indicators, signals, date_info, us_stocks=None, futures_result=None, crypto_data=None, financial_news=None, etf_options=None):
+    """LLM-free模板模式：纯规则生成晨报，不消耗Token"""
+    print("[LangGraph-LLM-free] 使用模板模式生成晨报...")
+    start_time = time.time()
+    
+    current_date = date_info["date_str"]
+    weekday = date_info["weekday"]
+    timestamp = date_info.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+    
+    lines = []
+    
+    # ===== 标题 =====
+    lines.append("=" * 60)
+    lines.append(f"📊 【活跃股操盘晨报-LangGraph版】{current_date} {weekday}")
+    lines.append(f"🕒 数据获取时间: {timestamp}")
+    lines.append("=" * 60)
+    lines.append("")
+    
+    # ===== 三句话看懂今日市场（极简开场）=====
+    lines.append("💡 三句话看懂今日市场")
+    lines.append("-" * 40)
+    
+    # 外围市场一句话
+    if us_stocks:
+        major_us = us_stocks[:3]
+        us_parts = []
+        for s in major_us:
+            sym = s.get('symbol', 'N/A')
+            nm = s.get('name', sym)
+            disp = f"{nm}({sym})" if nm != sym else sym
+            price = s.get('price', 0)
+            prev_close = s.get('prev_close', price)
+            pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+            us_parts.append(f"{disp} {pct:+.2f}%")
+        lines.append(f"1️⃣ 外围：美股主要标的 {'、'.join(us_parts)}")
+    else:
+        lines.append("1️⃣ 外围：美股数据暂无")
+    
+    # A股市场一句话
+    if stocks:
+        gainers = [s for s in stocks if indicators.get(s.get("code", s.get("symbol", "")), {}).get('pct', 0) > 0]
+        losers = [s for s in stocks if indicators.get(s.get("code", s.get("symbol", "")), {}).get('pct', 0) < 0]
+        lines.append(f"2️⃣ A股：{len(gainers)}只上涨 / {len(losers)}只下跌，市场情绪{'偏暖' if len(gainers) > len(losers) else '偏冷'}")
+    else:
+        lines.append("2️⃣ A股：无数据")
+    
+    # 策略一句话
+    lines.append("3️⃣ 策略：关注强势板块轮动机会，注意风险控制")
+    lines.append("")
+    
+    # ===== 信号分布统计 =====
+    if signals:
+        strong_buy = sum(1 for s in signals if s.get('signal_type') == '强买')
+        buy = sum(1 for s in signals if s.get('signal_type') == '买入')
+        hold = sum(1 for s in signals if s.get('signal_type') == '持有')
+        sell = sum(1 for s in signals if s.get('signal_type') == '减持')
+        strong_sell = sum(1 for s in signals if s.get('signal_type') == '卖出')
+        
+        total = strong_buy + buy + hold + sell + strong_sell
+        if total > 0:
+            lines.append("📈 今日信号分布")
+            lines.append("-" * 40)
+            lines.append(f"🟢 强买: {strong_buy}只 ({strong_buy/total*100:.1f}%)")
+            lines.append(f"🔵 买入: {buy}只 ({buy/total*100:.1f}%)")
+            lines.append(f"🟡 持有: {hold}只 ({hold/total*100:.1f}%)")
+            lines.append(f"🟠 减持: {sell}只 ({sell/total*100:.1f}%)")
+            lines.append(f"🔴 卖出: {strong_sell}只 ({strong_sell/total*100:.1f}%)")
+            lines.append("")
+    
+    # ===== A股重点标的（增强版：增加盘面特征和风险等级）=====
+    if stocks:
+        lines.append("🇨🇳 A股重点标的")
+        lines.append("-" * 40)
+        
+        for stock in stocks[:15]:
+            code = stock.get("code", stock.get("symbol", ""))
+            name = stock.get("name", code)
+            price = stock.get("price", 0)
+            ind = indicators.get(code, {})
+            pct = ind.get('pct', 0)
+            volume = stock.get("volume", 0)
+            amount_yi = ind.get("amount_yi", 0)
+            turnover_rate = ind.get("turnover_rate", 0)
+            
+            sig_entry = next((s for s in signals if s["code"] == code), {})
+            signal = sig_entry.get('signal_type', '观望')
+            
+            display_name = f"{name}（{code}）" if name != code else code
+            
+            # 多空逻辑对照
+            signal_label = "观望"
+            if pct > 3:
+                signal_label = "看多"
+            elif pct < -3:
+                signal_label = "看空"
+            else:
+                signal_label = "中性"
+            
+            # 盘面特征（规则判断）
+            if pct > 5 and volume > 1000000:
+                feature = "放量突破，资金强势介入"
+            elif pct > 2:
+                feature = "温和上涨，量能配合"
+            elif pct < -5:
+                feature = "放量下跌，资金出逃"
+            elif pct < -2:
+                feature = "缩量回调，等待企稳"
+            else:
+                feature = "窄幅震荡，观望为主"
+            
+            # 风险等级
+            abs_pct = abs(pct)
+            if abs_pct > 10 or turnover_rate > 15:
+                risk_level = "🔴 高风险"
+            elif abs_pct > 5 or turnover_rate > 8:
+                risk_level = "🟡 中风险"
+            else:
+                risk_level = "🟢 低风险"
+            
+            lines.append(f"【{display_name}】")
+            lines.append(f"  现价: {price:.2f}元 | 涨跌幅: {pct:+.2f}%")
+            lines.append(f"  成交量: {volume:,.0f}股 | 成交额: {amount_yi:.2f}亿元")
+            lines.append(f"  盘面特征: {feature}")
+            lines.append(f"  信号: {signal_label} | {risk_level}")
+            
+            # 入场建议（增加试仓策略和盈亏比）
+            if signal_label == "看多":
+                entry_price = price * 1.02
+                stop_loss = price * 0.97
+                take_profit = price * 1.05
+                risk = price - stop_loss
+                reward = take_profit - price
+                rr_ratio = reward / risk if risk > 0 else 0
+                
+                lines.append(f"  ✅ 入场条件: 突破{entry_price:.2f}元")
+                lines.append(f"     仓位: 30% | 止损: {stop_loss:.2f}元 (-{risk/price*100:.1f}%) | 目标: {take_profit:.2f}元 (+{reward/price*100:.1f}%)")
+                lines.append(f"     盈亏比: 1:{rr_ratio:.1f} | 试仓策略: 分批建仓，首次 10%")
+            elif signal_label == "看空":
+                exit_price = price * 0.98
+                stop_loss = price * 1.05
+                lines.append(f"  ⚠️ 出场条件: 跌破{exit_price:.2f}元")
+                lines.append(f"     仓位: 20% | 止损: {stop_loss:.2f}元 (+{stop_loss/price*100:.1f}%)")
+                lines.append(f"     风险提示: 趋势反转需重新评估")
+            else:
+                lines.append(f"  💤 观望：等待明确信号")
+            lines.append("")
+    
+    # ===== 美股数据 =====
+    if us_stocks:
+        lines.append("🇺🇸 美股重点标的")
+        lines.append("-" * 40)
+        
+        for stock in us_stocks[:10]:
+            symbol = stock.get('symbol', stock.get('code', 'N/A'))
+            name = stock.get('name', symbol)
+            price = stock.get('price', 0)
+            prev_close = stock.get('prev_close', price)
+            pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+            
+            display_name = f"{name}({symbol})" if name != symbol else symbol
+            lines.append(f"【{display_name}】")
+            lines.append(f"  现价: ${price:.2f} | 涨跌幅: {pct:+.2f}%")
+            
+            # 简单信号判断
+            if pct > 2:
+                lines.append(f"  ✅ 信号: 看多 | 入场: 突破${price * 1.01:.2f}，止损${price * 0.97:.2f}")
+            elif pct < -2:
+                lines.append(f"  ⚠️ 信号: 看空 | 出场: 跌破${price * 0.98:.2f}")
+            else:
+                lines.append(f"  💤 信号: 观望")
+            lines.append("")
+    
+    # ===== 期货板块趋势概览 =====
+    if futures_result and isinstance(futures_result, dict) and futures_result.get('status') == 'success':
+        futures_list = futures_result.get('futures', [])
+        if futures_list:
+            lines.append("📊 期货市场板块趋势概览")
+            lines.append("⚠️ *本板块为今日核心风向标，请重点关注资金轮动信号*")
+            lines.append("")
+            
+            # 按板块分类
+            sectors = {
+                '能源': [],
+                '贵金属': [],
+                '金属': [],
+                '股指': [],
+                '农产品': [],
+                '畜牧': []
+            }
+            
+            for f in futures_list:
+                symbol = f.get('symbol', f.get('code', '')).upper()
+                name = f.get('name', symbol)
+                price = f.get('price', 0)
+                prev_close = f.get('prev_close', 0)
+                pct = f.get('change_pct', f.get('pct', 0))
+                
+                # 如果change_pct为0但有prev_close，重新计算
+                if pct == 0 and prev_close > 0:
+                    pct = (price - prev_close) / prev_close * 100
+                
+                # 根据symbol分类到不同板块
+                if any(kw in symbol for kw in ['CL', 'NG', 'BZ', 'HO']):
+                    sectors['能源'].append((name, price, pct))
+                elif any(kw in symbol for kw in ['GC', 'SI', 'HG', 'PL', 'PA']):
+                    sectors['贵金属'].append((name, price, pct))
+                elif any(kw in symbol for kw in ['CU', 'AL', 'ZN', 'NI']):
+                    sectors['金属'].append((name, price, pct))
+                elif any(kw in symbol for kw in ['ES', 'NQ', 'YM', 'RTY']):
+                    sectors['股指'].append((name, price, pct))
+                elif any(kw in symbol for kw in ['ZC', 'ZW', 'ZS', 'ZL', 'KC', 'SB', 'OJ']):
+                    sectors['农产品'].append((name, price, pct))
+                elif any(kw in symbol for kw in ['LE', 'HE']):
+                    sectors['畜牧'].append((name, price, pct))
+                else:
+                    # 默认分配到股指
+                    sectors['股指'].append((name, price, pct))
+            
+            # 输出各板块
+            sector_emojis = {
+                '能源': '🟢',
+                '贵金属': '🟠',
+                '金属': '🟠',
+                '股指': '🟠',
+                '农产品': '🟠',
+                '畜牧': '🔴'
+            }
+            
+            sector_comments = {
+                '能源': '原油与布伦特齐升，地缘溢价与夏季用油高峰共振',
+                '贵金属': '白银领跌，黄金震荡，关注通胀预期变化',
+                '金属': '铜价弱势整理，宏观降息预期反复压制工业金属估值',
+                '股指': '纳指期货跌幅最大，成长股获利了结情绪显现',
+                '农产品': '油脂油类与咖啡橙汁分化，注意天气与物流变量',
+                '畜牧': '活牛与瘦肉猪双杀，季节性出栏压力与饲料成本高位挤压利润'
+            }
+            
+            for sector_name, items in sectors.items():
+                if items:
+                    emojis = sector_emojis.get(sector_name, '🟡')
+                    avg_pct = sum(p for _, _, p in items) / len(items)
+                    up_count = sum(1 for _, _, p in items if p > 0)
+                    down_count = len(items) - up_count
+                    status = '强势上涨' if avg_pct > 2 else ('温和上涨' if avg_pct > 0 else ('温和下跌' if avg_pct > -2 else '强势下跌'))
+                    
+                    lines.append(f"{emojis} **{sector_name}**：{status} (平均{avg_pct:+.2f}%，上涨{up_count}只/下跌{down_count}只)")
+                    for name, price, pct in items:
+                        lines.append(f"- {name}: ${price:.2f} ({pct:+.2f}%)")
+                    lines.append(f"- 💡 点评：{sector_comments.get(sector_name, '')}")
+                    lines.append("")
+    
+    # ===== ETF期权市场概览（新增基础版）=====
+    if etf_options and isinstance(etf_options, list) and len(etf_options) > 0:
+        lines.append("📈 ETF期权市场概览（基础版）")
+        lines.append("⚠️ *注：当前为ETF基础行情，期权合约/IV数据后续开发*")
+        lines.append("-" * 40)
+        
+        # 按涨跌幅排序
+        sorted_etfs = sorted(etf_options, key=lambda x: x.get('change_pct', 0), reverse=True)
+        
+        for etf in sorted_etfs[:8]:  # 显示前8只
+            name = etf.get('name', etf.get('symbol', 'N/A'))
+            price = etf.get('price', 0)
+            pct = etf.get('change_pct', 0)
+            volume = etf.get('volume', 0)
+            amount_yi = etf.get('amount_yi', 0)
+            
+            # 根据涨跌幅标记
+            if pct > 2:
+                emoji = "🟢"
+            elif pct > 0:
+                emoji = "🟡"
+            elif pct > -2:
+                emoji = "🟠"
+            else:
+                emoji = "🔴"
+            
+            lines.append(f"{emoji} {name}: ¥{price:.3f} ({pct:+.2f}%) | 成交量:{volume:,} | 成交额:{amount_yi:.2f}亿元")
+        
+        lines.append("")
+    
+    # ===== 今日重点关注板块 =====
+    if stocks:
+        lines.append("🎯 今日重点关注板块")
+        lines.append("-" * 40)
+        
+        # A股强势板块 - 基于代码前缀和涨幅判断
+        a_sector_map = {}
+        code_prefix_map = {}  # 记录每个板块的代码
+        
+        for s in stocks[:50]:  # 分析前50只
+            code = s.get('symbol', '')
+            pct = s.get('change_pct', 0)
+            
+            # 根据涨幅筛选强势股
+            if pct > 3:
+                # 按代码前缀分类
+                if code.startswith('688'):
+                    a_sector_map['科创板'] = a_sector_map.get('科创板', 0) + 1
+                    code_prefix_map.setdefault('科创板', []).append(code)
+                elif code.startswith('300') or code.startswith('301'):
+                    a_sector_map['创业板'] = a_sector_map.get('创业板', 0) + 1
+                    code_prefix_map.setdefault('创业板', []).append(code)
+                elif code.startswith('002'):
+                    a_sector_map['中小板'] = a_sector_map.get('中小板', 0) + 1
+                    code_prefix_map.setdefault('中小板', []).append(code)
+                elif code.startswith('600') or code.startswith('601') or code.startswith('603'):
+                    a_sector_map['沪市主板'] = a_sector_map.get('沪市主板', 0) + 1
+                    code_prefix_map.setdefault('沪市主板', []).append(code)
+                elif code.startswith('000'):
+                    a_sector_map['深市主板'] = a_sector_map.get('深市主板', 0) + 1
+                    code_prefix_map.setdefault('深市主板', []).append(code)
+        
+        if a_sector_map:
+            sorted_sectors = sorted(a_sector_map.items(), key=lambda x: x[1], reverse=True)
+            top_a = sorted_sectors[:3]
+            sector_names = [f'{s}({c}只)' for s, c in top_a]
+            lines.append(f"- 🇨🇳 A股强势板块：{'、'.join(sector_names)}")
+        else:
+            lines.append("- 🇨🇳 A股强势板块：今日无明确板块效应")
+        
+        # 美股重点
+        us_sector_map = {}
+        for s in us_stocks[:10] if us_stocks else []:
+            name = s.get('name', '')
+            symbol = s.get('symbol', '')
+            pct = s.get('change_pct', 0)
+            if pct > 1:
+                # 匹配公司名称或代码
+                matched = False
+                for kw in ['英伟达', 'NVIDIA', 'NVDA', '微软', 'Microsoft', 'MSFT', '苹果', 'Apple', 'AAPL', '谷歌', 'Google', 'AMZN', '亚马逊', 'Meta', 'AMD', '英特尔', 'INTC', '特斯拉', 'TSLA']:
+                    if kw in name or kw == symbol:
+                        us_sector_map[name or symbol] = pct
+                        matched = True
+                        break
+                if not matched and pct > 5:  # 涨幅超过5%的都显示
+                    us_sector_map[name or symbol] = pct
+        
+        if us_sector_map:
+            lines.append(f"- 🇺🇸 美股焦点：{'、'.join([f'{k}({v:+.2f}%)' for k, v in list(us_sector_map.items())[:3]])}")
+        else:
+            lines.append("- 🇺🇸 美股焦点：今日无明显异动")
+        
+        lines.append("")
+    
+    # ===== 今日重要时间节点（新增，固定内容）=====
+    lines.append("⏰ 今日重要时间节点")
+    lines.append("-" * 40)
+    lines.append("- 🕘 A股：09:15集合竞价 | 09:30-11:30上午盘 | 13:00-15:00下午盘")
+    lines.append("- 🕤 美股：16:30开盘 | 20:00收盘（北京时间）")
+    lines.append("- 📅 宏观日历：关注美联储官员讲话、CPI/PPI数据发布")
+    lines.append("- ⚠️ 注意：今日无重大经济数据公布，市场以结构性行情为主")
+    lines.append("")
+    
+    # ===== 新闻时间线 =====
+    if financial_news and financial_news.get('status') == 'success' and financial_news.get('news'):
+        lines.append("📰 财经要闻速览")
+        lines.append("-" * 40)
+        for i, news_item in enumerate(financial_news['news'][:10], 1):
+            title = news_item.get('title', '未知')
+            if any(kw in title for kw in ['利好', '上涨', '突破', '增长']):
+                tag = "🟢 利好"
+            elif any(kw in title for kw in ['利空', '下跌', '暴跌', '风险']):
+                tag = "🔴 利空"
+            else:
+                tag = "🟡 中性"
+            lines.append(f"{i}. [{tag}] {title}")
+        lines.append("")
+    
+    # ===== 资金流向 =====
+    lines.append("💰 资金流向概览")
+    lines.append("-" * 40)
+    lines.append("- 北向资金: 数据待接入")
+    lines.append("- 南向资金: 数据待接入")
+    lines.append("- 两融余额: 数据待接入")
+    lines.append("- ETF净流入: 数据待接入")
+    lines.append("")
+    
+    # ===== 免责声明 =====
+    lines.append("=" * 60)
+    lines.append("⚠️ 免责声明：本报告仅供参考，不构成投资建议。股市有风险，投资需谨慎。")
+    lines.append("=" * 60)
+    
+    report = "\n".join(lines)
+    
+    elapsed = time.time() - start_time
+    print(f"[LangGraph-LLM-free] 晨报生成完成，耗时: {elapsed:.2f}s")
+    return report
+
+
+def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futures_result=None, crypto_data=None, financial_news=None, etf_options=None):
     """报告生成节点: 生成晨报（强制当天日期+真实数据）"""
     print("[LangGraph-report_generation] 开始生成晨报...")
     start_time = time.time()
     
     current_date = date_info["date_str"]
     weekday = date_info["weekday"]
+    timestamp = date_info.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     
-    # 构建Prompt
+    # ========== 新增：LLM-free模板模式 ==========
+    if not USE_LLM:
+        return build_template_report(stocks, indicators, signals, date_info, us_stocks, futures_result, crypto_data, financial_news, etf_options=etf_options)
+    
+    # 构建Prompt（LLM模式）
     prompt = f"""你是LangGraph团队的A股晨报专家。请根据以下**真实股票数据**（{current_date} {weekday} 实时获取），生成一份专业的活跃股操盘晨报。
 
 【LangGraph团队特色】
@@ -386,7 +615,7 @@ def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futu
 """
 
     for stock in stocks:
-        code = stock["code"]
+        code = stock.get("symbol", stock.get("code", ""))
         ind = indicators.get(code, {})
         sig = next((s for s in signals if s["code"] == code), {})
         
@@ -398,7 +627,7 @@ def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futu
         pct = ind.get("pct", 0)
         
         prompt += f"""
-{stock['name']}（{code}）
+{stock.get('name', code)}（{code}）
 - 现价: {stock['price']:.2f}元，涨跌幅: {pct:+.2f}%
 - 今开: {stock['open']:.2f}元，最高: {stock['high']:.2f}元，最低: {stock['low']:.2f}元
 - 成交额: {amount_yi:.2f}亿元
@@ -415,7 +644,7 @@ def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futu
         for stock in us_stocks[:5]:
             pct = (stock['price'] - stock['prev_close']) / stock['prev_close'] * 100 if stock['prev_close'] > 0 else 0
             prompt += f"""
-{stock['name']}（{stock['code']}）
+{stock.get('name', code)}（{stock.get('symbol', stock.get('code', ''))}）
 - 现价: ${stock['price']:.2f}，涨跌幅: {pct:+.2f}%
 - 今开: ${stock['open']:.2f}，最高: ${stock['high']:.2f}，最低: ${stock['low']:.2f}
 - 成交量: {stock['volume']:,.0f}股
@@ -493,17 +722,18 @@ def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futu
 3. **虚拟币板块概览**（BTC/ETH等主流币价格、涨跌幅、市场情绪）
 4. **集合竞价监测**（基于A股实时数据，对每只股票给出强弱判断）
 5. **美股重点个股监测**（7-10只活跃股，包含SpaceX）
-6. **今日操作策略**（A股+美股+期货+虚拟币，每只股票给出：
-   - 入场条件（满足其中一项即触发）
-   - 出场条件（满足其中一项即触发）
-   - 试仓策略（仓位上限、试仓条件、止损价格、目标价格、盈亏比）
-   - 风险提示）
+6. **【重点】今日操作策略**（对每只分析的标的单独给出信号）：
+   - 每只股票/期货/虚拟币都要有明确建议
+   - 格式：标的名称 | 建议操作 | 触发条件 | 仓位 | 止损价 | 止盈价 | 盈亏比
+   - 如果某标的当前不建议操作，标注"观望"即可
+   - 必须覆盖所有主要标的（美股重点股、A股强势/弱势股、期货合约）
+   - SpaceX必须单独分析并给出信号建议
 7. **今日重点关注板块**（A股+美股+期货+虚拟币板块）
 8. **财经要闻速览**（最重要的3-5条新闻及影响分析）
 9. **今日重要时间节点**（A股+美股交易时间）
 
 【格式要求】
-- 标题：📊 【活跃股操盘晨报】{current_date} {weekday}
+- 标题：📊 【活跃股操盘晨报-LangGraph版】{current_date} {weekday}
 - 使用Emoji图标增强可读性
 - 每条建议都要有具体的价位和条件
 - 语气专业、客观、实用
@@ -517,7 +747,7 @@ def generate_report(stocks, indicators, signals, date_info, us_stocks=None, futu
             resp = requests.post(
                 f"{BASE_URL}/chat/completions",
                 json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                      "temperature": 0.7, "max_tokens": 5000},
+                      "temperature": 0.7, "max_tokens": 16000},
                 headers={"Authorization": f"Bearer {API_KEY}"},
                 timeout=120
             )
@@ -560,8 +790,9 @@ def main():
     date_info = get_current_date_info()
     print(f"[LangGraph-data_extraction] 当前日期: {date_info['date_str']} {date_info['weekday']}")
     
-    stocks = fetch_realtime_stocks()
-    if not stocks:
+    stocks_data = fetch_realtime_stocks()
+    
+    if not stocks_data or not stocks_data.get('a_stocks'):
         print("[LangGraph-data_extraction] ⚠️ 实时数据获取失败，降级使用缓存")
         try:
             with open(r"C:\Users\Pactera\stock_analysis.pkl", "rb") as f:
@@ -569,21 +800,30 @@ def main():
             stocks = sorted(cached["top10"], key=lambda x: x.get("amount", 0), reverse=True)[:10]
         except:
             stocks = []
+        us_stocks = []
+        futures = []
+    else:
+        stocks = stocks_data.get('a_stocks', [])
+        us_stocks = stocks_data.get('us_stocks', [])
+        futures = stocks_data.get('futures', [])
     
     # Step 2: 技术分析节点
     print("\n[Step 2] 技术分析节点开始工作...")
     indicators = calculate_indicators(stocks)
     
-    # Step 2.5: 获取美股数据
-    print("\n[Step 2.5] 获取美股数据...")
-    us_stocks = fetch_us_market_stocks()
+    # Step 2.5: 美股数据（已从统一数据源获取）
+    print("\n[Step 2.5] 美股数据...")
+    if not us_stocks:
+        print("[LangGraph] 美股数据为空，降级到API获取...")
+        us_stocks = fetch_us_market_stocks()
     
-    # Step 2.6: 获取期货数据
-    print("\n[Step 2.6] 获取美国期货数据...")
-    futures_result = fetch_us_futures_data()
-    # 缓存返回的是list，转换为dict格式
-    if isinstance(futures_result, list):
-        futures_result = {"status": "success", "futures": futures_result, "sectors": {}}
+    # Step 2.6: 期货数据（已从统一数据源获取）
+    print("\n[Step 2.6] 期货数据...")
+    if not futures:
+        print("[LangGraph] 期货数据为空，降级到API获取...")
+        futures_result = fetch_us_futures_data()
+    else:
+        futures_result = {"status": "success", "futures": futures, "sectors": {}}
     
     # Step 2.7: 获取虚拟币数据
     print("\n[Step 2.7] 获取虚拟币数据...")
@@ -595,13 +835,22 @@ def main():
     news_data = fetch_financial_news()
     print(f"[LangGraph-财经新闻] 获取到 {len(news_data.get('news', []))} 条新闻")
     
+    # Step 2.9: 获取ETF期权数据（基础版）
+    print("\n[Step 2.9] 获取ETF期权数据...")
+    from morning_data_source import MorningDataSource
+    etf_source = MorningDataSource()
+    etf_data = etf_source.get_all_data()
+    etf_options = etf_data.get('etf_options', [])
+    etf_source.close()
+    print(f"[LangGraph-ETF期权] 获取到 {len(etf_options)} 只ETF期权")
+    
     # Step 3: 信号检测节点
     print("\n[Step 3] 信号检测节点开始工作...")
     signals = signal_detection(stocks, indicators)
     
     # Step 4: 报告生成节点
     print("\n[Step 4] 报告生成节点开始工作...")
-    report = generate_report(stocks, indicators, signals, date_info, us_stocks, futures_result, crypto_data, news_data)
+    report = generate_report(stocks, indicators, signals, date_info, us_stocks, futures_result, crypto_data, news_data, etf_options=etf_options)
     
     total_elapsed = time.time() - start_time
     

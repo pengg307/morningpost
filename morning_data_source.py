@@ -44,7 +44,8 @@ class MorningDataSource:
             'futures': [],
             'crypto': [],
             'news': [],
-            'indices': {}
+            'indices': {},
+            'etf_options': []  # ETF期权数据（基础版）
         }
         
         # 1. 从SQLite读取
@@ -71,6 +72,11 @@ class MorningDataSource:
             print("[MorningDataSource] 新闻数据为空，降级到API获取...")
             data['news'] = self._fetch_news_api()
         
+        # ETF期权数据（基础版）
+        print("[MorningDataSource] 获取ETF期权数据...")
+        data['etf_options'] = self._fetch_etf_options_api()
+        print(f"[MorningDataSource] ETF期权: {len(data['etf_options'])}只")
+        
         # 缓存
         self.cache['all'] = data
         return data
@@ -79,8 +85,8 @@ class MorningDataSource:
         """从SQLite数据库加载数据"""
         cursor = self.manager.conn.cursor()
         
-        # 获取最近1天内的数据
-        cutoff = (datetime.now() - timedelta(days=1)).isoformat()
+        # 获取最近2天内的数据（周末/节假日数据可能隔天）
+        cutoff = (datetime.now() - timedelta(days=2)).isoformat()
         
         cursor.execute("""
             SELECT symbol, latest_price, prev_close, open_price, high, low,
@@ -93,16 +99,30 @@ class MorningDataSource:
         rows = cursor.fetchall()
         
         for row in rows:
+            symbol = row['symbol']
+            price = float(row['latest_price']) if row['latest_price'] else 0
+            prev_close = float(row['prev_close']) if row['prev_close'] else 0
+            open_price = float(row['open_price']) if row['open_price'] else 0
+            high = float(row['high']) if row['high'] else 0
+            low = float(row['low']) if row['low'] else 0
+            volume = float(row['volume']) if row['volume'] else 0
+            change_pct = float(row['change_pct']) if row['change_pct'] else 0
+            quality = float(row['data_quality_score']) if row['data_quality_score'] else 0
+            
+            # 估算成交额（volume单位可能是手或股，这里统一用volume*price）
+            turnover = volume * price if price > 0 else 0
+            
             item = {
-                'symbol': row['symbol'],
-                'price': float(row['latest_price']) if row['latest_price'] else 0,
-                'prev_close': float(row['prev_close']) if row['prev_close'] else 0,
-                'open': float(row['open_price']) if row['open_price'] else 0,
-                'high': float(row['high']) if row['high'] else 0,
-                'low': float(row['low']) if row['low'] else 0,
-                'volume': int(row['volume']) if row['volume'] else 0,
-                'change_pct': float(row['change_pct']) if row['change_pct'] else 0,
-                'quality': float(row['data_quality_score']) if row['data_quality_score'] else 0,
+                'symbol': symbol,
+                'price': price,
+                'prev_close': prev_close,
+                'open': open_price,
+                'high': high,
+                'low': low,
+                'volume': volume,
+                'turnover': turnover,  # 新增：估算成交额
+                'change_pct': change_pct,
+                'quality': quality,
             }
             
             asset_id = row['asset_class_id']
@@ -279,6 +299,44 @@ class MorningDataSource:
             print(f"[MorningDataSource] 新闻API获取失败: {e}")
         
         return news
+    
+    def _fetch_etf_options_api(self):
+        """通过腾讯API获取ETF期权数据（基础版：ETF本身行情）"""
+        etf_options = []
+        try:
+            # 主要ETF期权标的
+            etf_codes = [
+                'sh510050', 'sh510300', 'sh588000', 'sz159919', 'sz159922',
+                'sh510500', 'sh518880', 'sz159985'
+            ]
+            codes_str = ','.join(etf_codes)
+            url = f'http://qt.gtimg.cn/q={codes_str}'
+            resp = requests.get(url, timeout=10)
+            
+            if resp.status_code == 200:
+                for line in resp.text.strip().split(';'):
+                    if line.strip() and '~' in line:
+                        parts = line.split('~')
+                        if len(parts) > 38:
+                            name = parts[1]
+                            price = float(parts[3]) if parts[3] else 0
+                            pct = float(parts[32]) if parts[32] else 0
+                            volume = int(parts[37]) if parts[37] else 0
+                            amount = float(parts[38]) if parts[38] else 0
+                            
+                            etf_options.append({
+                                'symbol': parts[2],  # 代码
+                                'name': name,
+                                'price': price,
+                                'change_pct': pct,
+                                'volume': volume,
+                                'amount_yi': amount,  # 成交额亿元
+                                'type': 'etf_option_base'  # ETF期权基础数据
+                            })
+        except Exception as e:
+            print(f"[MorningDataSource] ETF期权API获取失败: {e}")
+        
+        return etf_options
     
     def close(self):
         """关闭连接"""
