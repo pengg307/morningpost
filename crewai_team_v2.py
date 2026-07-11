@@ -1194,5 +1194,52 @@ def fetch_financial_news():
         return {"status": "error", "news": []}
 
 
+# ========== 新增：晚报系统集成 ==========
+def run_evening_report():
+    """运行晚报系统（零 Token 模式）"""
+    print("\n" + "=" * 60)
+    print("📊 开始生成晚报...")
+    print("=" * 60)
+    
+    start_time = time.time()
+    
+    # Step 1: 获取晚报数据
+    from evening_data_source import EveningDataSource
+    source = EveningDataSource()
+    data = source.get_all_data()
+    source.close()
+    
+    # Step 2: 生成晚报报告
+    from evening_report import build_evening_report
+    report = build_evening_report(data)
+    
+    total_elapsed = time.time() - start_time
+    
+    # Step 3: 保存报告
+    report_path = r"C:\Users\Pactera\projects\evening_report.txt"
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write(report)
+    
+    output = {
+        "framework": "CrewAI",
+        "task": "A 股活跃股操盘晚报",
+        "status": "success",
+        "result": report,
+        "data_source": "东方财富 API+ 腾讯 API 实时数据",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "execution_time": round(total_elapsed, 2)
+    }
+    
+    result_path = r"C:\Users\Pactera\projects\crewai_evening_result.json"
+    with open(result_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=2, ensure_ascii=False)
+    
+    print(f"\n💾 晚报已保存到: {report_path}")
+    print(f"⏱️  执行时间: {total_elapsed:.2f}s")
+    print(f"\n📄 晚报内容:\n{report}")
+    
+    return output
+
+
 if __name__ == "__main__":
     main()
