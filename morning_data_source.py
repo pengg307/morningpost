@@ -284,24 +284,58 @@ class MorningDataSource:
         return futures
 
     def _fetch_crypto(self) -> list:
-        """Fetch crypto data from CoinGecko Free API (no proxy needed)."""
+        """Fetch crypto data from Binance Public API with proxy support."""
+        import requests
         crypto = []
+        PROXY = 'http://127.0.0.1:10808'
+        
+        # 方法1: 尝试Binance API（带代理）
         try:
-            import requests
-            url = 'https://api.coingecko.com/api/v3/simple/price'
-            params = {
-                'ids': 'bitcoin,ethereum,tether,solana,binancecoin,dogecoin,cardano,xrp,polkadot,avalanche-2',
-                'vs_currencies': 'usd,cny',
-                'include_24hr_change': 'true',
-                'include_market_cap': 'true',
-            }
-            resp = requests.get(url, params=params, timeout=10)
+            resp = requests.get('https://api.binance.com/api/v3/ticker/24hr',
+                               proxies={'http': PROXY, 'https': PROXY},
+                               timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                # 过滤主要USDT交易对
+                target_symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT', 'DOGEUSDT',
+                                 'ADAUSDT', 'XRPUSDT', 'DOTUSDT', 'AVAXUSDT', 'LINKUSDT',
+                                 'MATICUSDT', 'SHIBUSDT', 'LTCUSDT', 'BCHUSDT', 'UNIUSDT']
+                names_map = {s.replace('USDT', ''): s.replace('USDT', '') for s in target_symbols}
+                
+                for item in data:
+                    symbol = item['symbol']
+                    if symbol in target_symbols:
+                        price = float(item['lastPrice'])
+                        change = float(item['priceChangePercent'])
+                        crypto.append({
+                            'name': names_map.get(symbol.replace('USDT', ''), symbol.replace('USDT', '')),
+                            'symbol': symbol.replace('USDT', ''),
+                            'price_usd': price,
+                            'change_pct': change,
+                            'type': 'crypto',
+                        })
+                
+                if crypto:
+                    print(f"[MorningDataSource] 加密货币数据(Binance): {len(crypto)}只")
+                    return crypto
+        except Exception as e:
+            print(f"[MorningDataSource] Binance代理请求失败: {e}")
+        
+        # 方法2: 降级到CoinGecko（免费，无代理）
+        try:
+            resp = requests.get('https://api.coingecko.com/api/v3/simple/price',
+                               params={
+                                   'ids': 'bitcoin,ethereum,solana,binancecoin,dogecoin,cardano,xrp,polkadot,avalanche-2,chainlink',
+                                   'vs_currencies': 'usd,cny',
+                                   'include_24hr_change': 'true',
+                                   'include_market_cap': 'true',
+                               },
+                               timeout=15)
             if resp.status_code == 200:
                 data = resp.json()
                 names = {
                     'bitcoin': ('比特币', 'BTC'),
                     'ethereum': ('以太坊', 'ETH'),
-                    'tether': ('USDT', 'USDT'),
                     'solana': ('Solana', 'SOL'),
                     'binancecoin': ('BNB', 'BNB'),
                     'dogecoin': ('Dogecoin', 'DOGE'),
@@ -309,11 +343,12 @@ class MorningDataSource:
                     'xrp': ('XRP', 'XRP'),
                     'polkadot': ('Polkadot', 'DOT'),
                     'avalanche-2': ('Avalanche', 'AVAX'),
+                    'chainlink': ('Chainlink', 'LINK'),
                 }
                 for coin_id, info in data.items():
                     name, symbol = names.get(coin_id, (coin_id, coin_id.upper()))
                     price_usd = info['usd']
-                    price_cny = info['cny']
+                    price_cny = info.get('cny', price_usd * 7.2)
                     change_24h = info.get('usd_24h_change', 0)
                     mcap = info.get('usd_market_cap', 0)
                     crypto.append({
@@ -325,10 +360,12 @@ class MorningDataSource:
                         'market_cap': mcap,
                         'type': 'crypto',
                     })
-                print(f"[MorningDataSource] 加密货币数据: {len(crypto)}只")
+                print(f"[MorningDataSource] 加密货币数据(CoinGecko): {len(crypto)}只")
                 return crypto
         except Exception as e:
-            print(f"[MorningDataSource] 加密货币API失败: {e}")
+            print(f"[MorningDataSource] CoinGecko失败: {e}")
+        
+        print("[MorningDataSource] 加密货币数据不可用")
         return []
 
     def _fetch_news(self) -> list:
