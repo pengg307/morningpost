@@ -2,13 +2,16 @@
 """
 下载A股活跃前1000只股票最近半年历史数据
 ===========================================
-使用东方财富K线API获取历史数据
+使用 baostock 免费API获取历史K线数据
 
 使用方法:
-    python download_historical_data.py
+    uv run python download_historical_data.py
+
+依赖: baostock, pandas (已安装)
 """
 
-import requests
+import baostock as bs
+import pandas as pd
 import sqlite3
 import time
 import os
@@ -16,15 +19,11 @@ from datetime import datetime, timedelta
 
 
 class HistoricalDataDownloader:
-    """历史数据下载器"""
+    """历史数据下载器 - 使用 baostock"""
     
     def __init__(self, db_path='data/market_data.db'):
         self.db_path = db_path
-        self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': 'https://www.eastmoney.com/'
-        })
+        self.session = bs.login()
         
         # 确保数据库目录存在
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -74,16 +73,15 @@ class HistoricalDataDownloader:
         conn.close()
         print("✅ 数据库表初始化完成")
     
-    def fetch_active_stocks_from_eastmoney(self, top_n=1000):
+    def get_active_stocks(self, top_n=1000):
         """
-        从东方财富获取活跃股列表
+        获取活跃股列表（使用东方财富接口）
         
-        Args:
-            top_n: 获取前N只股票
-            
         Returns:
             list: 股票列表 [{code, name, market}, ...]
         """
+        import requests
+        
         print(f"\n📊 正在从东方财富获取活跃股列表...")
         
         url = 'http://push2.eastmoney.com/api/qt/clist/get'
@@ -100,12 +98,12 @@ class HistoricalDataDownloader:
         }
         
         try:
-            resp = self.session.get(url, params=params, timeout=30)
+            resp = requests.get(url, params=params, timeout=30)
             data = resp.json()
             
             if not data.get('data') or not data['data'].get('diff'):
-                print("❌ 未获取到股票数据")
-                return []
+                print("❌ 未获取到股票数据，使用备用方案")
+                return self._get_all_a_stocks(top_n)
             
             stocks = []
             for item in data['data']['diff']:
@@ -130,91 +128,97 @@ class HistoricalDataDownloader:
             return stocks
             
         except Exception as e:
-            print(f"❌ 获取股票列表失败: {e}")
-            return []
+            print(f"❌ 获取股票列表失败: {e}，使用备用方案")
+            return self._get_all_a_stocks(top_n)
     
-    def _save_active_stocks(self, stocks):
-        """保存活跃股列表到数据库"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
+    def _get_all_a_stocks(self, top_n=1000):
+        """
+        备用方案：通过 baostock 获取所有A股列表
         
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        Args:
+            top_n: 返回前N只
+            
+        Returns:
+            list: 股票列表
+        """
+        print("\n📋 通过 baostock 获取A股列表...")
         
-        for stock in stocks:
-            cursor.execute('''
-                INSERT OR REPLACE INTO active_stocks (code, name, market, total_amount, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (
-                stock['code'],
-                stock['name'],
-                stock['market'],
-                stock.get('total_amount', 0),
-                now
-            ))
+        rs = bs.query_stock_basic()
+        data_list = []
+        while rs.next():
+            data_list.append(rs.get_row_data())
         
-        conn.commit()
-        conn.close()
-        print(f"💾 已保存 {len(stocks)} 只股票到数据库")
+        df = pd.DataFrame(data_list, columns=rs.fields)
+        
+        # 过滤上交所和深交所股票
+        a_stocks = df[df['exchange'].isin(['SSE', 'SZSE'])].head(top_n)
+        
+        stocks = []
+        for _, row in a_stocks.iterrows():
+            code = str(row['code'])
+            name = str(row['name'])
+            market = 'sh' if code.startswith('sh.') else 'sz'
+            
+            stocks.append({
+                'code': code.replace('.', ''),
+                'name': name,
+                'market': market,
+                'total_amount': 0
+            })
+        
+        print(f"✅ 获取到 {len(stocks)} 只A股")
+        return stocks
     
     def fetch_daily_kline(self, code, market):
         """
         获取单只股票近半年日线数据
         
         Args:
-            code: 股票代码
+            code: 股票代码（如 '600519'）
             market: 'sh' 或 'sz'
             
         Returns:
             list: K线数据
         """
-        # 设置secid: 1=沪市, 0=深市
-        secid = f'1.{code}' if market == 'sh' else f'0.{code}'
+        # baostock 格式：sh.600519 或 sz.000001
+        bs_code = f'{market}.{code}'
         
         # 计算半年前的日期
-        end_date = datetime.now().strftime('%Y%m%d')
-        beg_date = (datetime.now() - timedelta(days=180)).strftime('%Y%m%d')
-        
-        url = 'http://push2his.eastmoney.com/api/qt/stock/kline/get'
-        params = {
-            'secid': secid,
-            'fields1': 'f1,f2,f3,f4,f5,f6',
-            'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-            'klt': 101,  # 日线
-            'fqt': 1,  # 前复权
-            'beg': beg_date,
-            'end': end_date,
-            'lmt': 250  # 最大返回250条（约1年）
-        }
+        end_date = datetime.now().strftime('%Y-%m-%d')
+        beg_date = (datetime.now() - timedelta(days=180)).strftime('%Y-%m-%d')
         
         try:
-            resp = self.session.get(url, params=params, timeout=10)
-            data = resp.json()
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                'date,code,open,high,low,close,volume,amount,turn,pctChg',
+                start_date=beg_date,
+                end_date=end_date,
+                frequency='d',
+                adjustflag='2'  # 2：前复权
+            )
             
-            if not data.get('data') or not data['data'].get('klines'):
+            if rs.error_code != '0':
+                print(f"  ❌ {bs_code} 查询失败: {rs.error_msg}")
                 return []
             
             klines = []
-            for line in data['data']['klines']:
-                parts = line.split(',')
-                if len(parts) < 7:
-                    continue
-                
-                # 解析K线数据
-                # 格式: 日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
-                try:
-                    klines.append({
-                        'date': parts[0],
-                        'open': float(parts[1]),
-                        'close': float(parts[2]),
-                        'high': float(parts[3]),
-                        'low': float(parts[4]),
-                        'volume': float(parts[5]),
-                        'amount': float(parts[6]),
-                        'change_pct': float(parts[8]) if len(parts) > 8 else 0,
-                        'turnover_rate': float(parts[10]) if len(parts) > 10 else 0
-                    })
-                except (ValueError, IndexError):
-                    continue
+            while rs.next():
+                row = rs.get_row_data()
+                if len(row) >= 7:
+                    try:
+                        klines.append({
+                            'date': row[0],
+                            'open': float(row[2]),
+                            'close': float(row[5]),
+                            'high': float(row[3]),
+                            'low': float(row[4]),
+                            'volume': float(row[6]),
+                            'amount': float(row[7]) if len(row) > 7 else 0,
+                            'change_pct': float(row[9]) if len(row) > 9 else 0,
+                            'turnover_rate': float(row[8]) if len(row) > 8 else 0
+                        })
+                    except (ValueError, IndexError):
+                        continue
             
             return klines
             
@@ -257,7 +261,30 @@ class HistoricalDataDownloader:
         conn.close()
         return saved_count
     
-    def download_all(self, top_n=1000, delay=0.3):
+    def save_active_stocks(self, stocks):
+        """保存活跃股列表到数据库"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        for stock in stocks:
+            cursor.execute('''
+                INSERT OR REPLACE INTO active_stocks (code, name, market, total_amount, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (
+                stock['code'],
+                stock['name'],
+                stock['market'],
+                stock.get('total_amount', 0),
+                now
+            ))
+        
+        conn.commit()
+        conn.close()
+        print(f"💾 已保存 {len(stocks)} 只股票到数据库")
+    
+    def download_all(self, top_n=1000, delay=0.2):
         """
         批量下载所有活跃股历史数据
         
@@ -266,14 +293,17 @@ class HistoricalDataDownloader:
             delay: 每只股票请求间隔（秒）
         """
         print("\n" + "=" * 70)
-        print("🚀 A股活跃股历史数据下载工具")
+        print("🚀 A股活跃股历史数据下载工具 (baostock)")
         print("=" * 70)
         
         # 1. 获取活跃股列表
-        stocks = self.fetch_active_stocks_from_eastmoney(top_n)
+        stocks = self.get_active_stocks(top_n)
         if not stocks:
             print("❌ 未获取到股票列表，退出")
             return
+        
+        # 保存活跃股列表
+        self.save_active_stocks(stocks)
         
         print(f"\n📋 待下载 {len(stocks)} 只股票历史数据")
         print("=" * 70)
@@ -318,12 +348,20 @@ class HistoricalDataDownloader:
         if success_count > 0:
             print(f"平均每只股票: {total_saved // success_count:.0f} 天")
         print("=" * 70)
+    
+    def cleanup(self):
+        """登出 baostock"""
+        bs.logout()
+        print("✅ baostock 已登出")
 
 
 def main():
     """主函数"""
     downloader = HistoricalDataDownloader()
-    downloader.download_all(top_n=1000, delay=0.3)
+    try:
+        downloader.download_all(top_n=1000, delay=0.2)
+    finally:
+        downloader.cleanup()
 
 
 if __name__ == '__main__':
