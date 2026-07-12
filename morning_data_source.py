@@ -106,7 +106,7 @@ class MorningDataSource:
             for line in resp.text.strip().split('\n'):
                 if '~' in line:
                     parts = line.split('~')
-                    if len(parts) > 49:
+                    try:
                         price = float(parts[3]) if parts[3] else 0
                         prev_close = float(parts[4]) if parts[4] else 0
                         pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
@@ -125,6 +125,8 @@ class MorningDataSource:
                             'pb': float(parts[40]) if len(parts) > 40 and parts[40] else 0,
                             'change_pct': pct,
                         })
+                    except (ValueError, IndexError):
+                        pass
         return stocks
 
     def _fetch_us_stocks(self) -> list:
