@@ -101,6 +101,79 @@ class ThreeDimensionSelector:
             print(f"[ThreeDimension] 加载历史数据失败: {e}")
         
         return history
+        
+        Args:
+            db_path: 数据库路径，默认使用项目data/market_data.db
+        """
+        if db_path is None:
+            import os
+            db_path = os.path.join(os.path.dirname(__file__), 'data', 'market_data.db')
+        
+        self.db_path = db_path
+        self.data_source = MorningDataSource()
+        
+        # 加载历史数据
+        self.history_data = self._load_history_data()
+    
+    def _load_history_data(self) -> dict:
+        """
+        从数据库加载历史K线数据
+        
+        Returns:
+            dict: {code: [{'date', 'open', 'close', 'high', 'low', 'volume', 'amount'}, ...]}
+        """
+        import sqlite3
+        
+        history = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 获取所有有历史数据的股票
+            cursor.execute('''
+                SELECT code, date, open, close, high, low, volume, amount
+                FROM stock_klines
+                ORDER BY code, date
+            ''')
+            
+            rows = cursor.fetchall()
+            
+            # 按股票代码分组
+            current_code = None
+            current_klines = []
+            
+            for row in rows:
+                code = row[0]
+                if code != current_code:
+                    # 保存上一个股票的数据
+                    if current_code and current_klines:
+                        history[current_code] = current_klines
+                    
+                    # 开始新股票
+                    current_code = code
+                    current_klines = []
+                
+                current_klines.append({
+                    'date': row[1],
+                    'open': row[2],
+                    'close': row[3],
+                    'high': row[4],
+                    'low': row[5],
+                    'volume': row[6],
+                    'amount': row[7]
+                })
+            
+            # 保存最后一个股票
+            if current_code and current_klines:
+                history[current_code] = current_klines
+            
+            conn.close()
+            print(f"[ThreeDimension] 从数据库加载 {len(history)} 只股票历史数据")
+            
+        except Exception as e:
+            print(f"[ThreeDimension] 加载历史数据失败: {e}")
+        
+        return history
         self.indicators = {}  # 技术指标
         
     def run_full_workflow(self):
@@ -202,30 +275,99 @@ class ThreeDimensionSelector:
                 'type': 'etf',
             }
     
-    def _calculate_rps(self, current_price, base_price, change_pct, period=20):
+    def calculate_rps(self, code: str, period: int = 20) -> float:
         """
-        计算 RPS (相对强度指标)
+        计算相对强度指标(RPS)
         
-        简化版：基于当前涨跌幅和周期进行估算
-        实际应用中需要历史数据来计算完整的 RPS
+        Args:
+            code: 股票代码
+            period: 计算周期(20/50/120)
+            
+        Returns:
+            float: RPS值(0-100)，越高越强
         """
-        if base_price <= 0:
+        import sqlite3
+        
+        # 优先从数据库读取
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 获取该股票最近period+1天的收盘价
+            cursor.execute('''
+                SELECT close, date 
+                FROM stock_klines 
+                WHERE code = ? 
+                ORDER BY date DESC 
+                LIMIT ?
+            ''', (code, period + 1))
+            
+            rows = cursor.fetchall()
+            conn.close()
+            
+            if len(rows) < period + 1:
+                return 0
+            
+            # 计算该股票的涨跌幅
+            current_close = rows[0][0]
+            previous_close = rows[-1][0]
+            
+            if previous_close == 0:
+                return 0
+            
+            stock_change_pct = ((current_close - previous_close) / previous_close) * 100
+            
+            # 获取所有股票的同期涨跌幅，计算排名
+            cursor.execute('''
+                SELECT code, close, date
+                FROM stock_klines
+                WHERE date = (SELECT MAX(date) FROM stock_klines)
+            ''')
+            latest_dates = cursor.fetchall()
+            
+            if not latest_dates:
+                return 0
+            
+            latest_date = latest_dates[0][2]
+            
+            # 获取所有股票在period周期前的收盘价
+            cursor.execute('''
+                SELECT sk.code, sk.close as latest_close, prev.close as previous_close
+                FROM stock_klines sk
+                LEFT JOIN stock_klines prev ON sk.code = prev.code AND prev.date = (
+                    SELECT date FROM stock_klines 
+                    WHERE code = sk.code 
+                    ORDER BY date DESC 
+                    LIMIT 1 OFFSET ?
+                )
+                WHERE sk.date = ?
+                AND sk.code IN (
+                    SELECT DISTINCT code FROM stock_klines
+                )
+            ''', (period, latest_date))
+            
+            all_stocks = cursor.fetchall()
+            conn.close()
+            
+            # 计算所有股票的涨跌幅
+            changes = []
+            for stock_code, latest, previous in all_stocks:
+                if previous and previous > 0:
+                    change_pct = ((latest - previous) / previous) * 100
+                    changes.append(change_pct)
+            
+            if not changes:
+                return 0
+            
+            # 计算排名
+            rank = sum(1 for c in changes if c < stock_change_pct)
+            rps = (rank / len(changes)) * 100
+            
+            return round(rps, 1)
+            
+        except Exception as e:
+            print(f"[ThreeDimension] 计算{code}的RPS({period})失败: {e}")
             return 0
-        
-        # 计算标的收益率
-        stock_return = (current_price - base_price) / base_price * 100
-        
-        # 简化处理：假设基准收益率为 0（大盘）
-        benchmark_return = 0
-        
-        # 计算超额收益
-        excess_return = stock_return - benchmark_return
-        
-        # 标准化至 0-100 区间 (简化版)
-        # 实际应用中需要使用历史数据计算百分位排名
-        rps = min(max(50 + excess_return * 2, 0), 100)
-        
-        return round(rps, 2)
     
     def _calculate_dbqr(self, current_price, base_price, change_pct):
         """

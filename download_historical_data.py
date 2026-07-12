@@ -2,13 +2,9 @@
 """
 下载A股活跃前1000只股票最近半年历史数据
 ===========================================
-功能：
-1. 从东方财富获取A股活跃股列表（按成交额排序）
-2. 批量下载每只股票近半年日线数据
-3. 存储到SQLite数据库
-4. 进度显示 + 错误处理
+使用东方财富K线API获取历史数据
 
-使用方法：
+使用方法:
     python download_historical_data.py
 """
 
@@ -26,7 +22,8 @@ class HistoricalDataDownloader:
         self.db_path = db_path
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer': 'https://www.eastmoney.com/'
         })
         
         # 确保数据库目录存在
@@ -77,17 +74,17 @@ class HistoricalDataDownloader:
         conn.close()
         print("✅ 数据库表初始化完成")
     
-    def fetch_active_stocks(self, top_n=1000):
+    def fetch_active_stocks_from_eastmoney(self, top_n=1000):
         """
         从东方财富获取活跃股列表
         
         Args:
-            top_n: 获取前N只活跃股
+            top_n: 获取前N只股票
             
         Returns:
-            list: 股票列表 [{code, name, market, total_amount}, ...]
+            list: 股票列表 [{code, name, market}, ...]
         """
-        print(f"\n📊 正在获取A股活跃前{top_n}只股票...")
+        print(f"\n📊 正在从东方财富获取活跃股列表...")
         
         url = 'http://push2.eastmoney.com/api/qt/clist/get'
         params = {
@@ -130,10 +127,6 @@ class HistoricalDataDownloader:
                 })
             
             print(f"✅ 成功获取 {len(stocks)} 只活跃股票")
-            
-            # 保存到数据库
-            self._save_active_stocks(stocks)
-            
             return stocks
             
         except Exception as e:
@@ -155,7 +148,7 @@ class HistoricalDataDownloader:
                 stock['code'],
                 stock['name'],
                 stock['market'],
-                stock['total_amount'],
+                stock.get('total_amount', 0),
                 now
             ))
         
@@ -172,14 +165,14 @@ class HistoricalDataDownloader:
             market: 'sh' 或 'sz'
             
         Returns:
-            list: K线数据 [{'date', 'open', 'close', 'high', 'low', 'volume', 'amount'}, ...]
+            list: K线数据
         """
+        # 设置secid: 1=沪市, 0=深市
+        secid = f'1.{code}' if market == 'sh' else f'0.{code}'
+        
         # 计算半年前的日期
         end_date = datetime.now().strftime('%Y%m%d')
         beg_date = (datetime.now() - timedelta(days=180)).strftime('%Y%m%d')
-        
-        # 设置secid
-        secid = f'1.{code}' if market == 'sh' else f'0.{code}'
         
         url = 'http://push2his.eastmoney.com/api/qt/stock/kline/get'
         params = {
@@ -190,11 +183,11 @@ class HistoricalDataDownloader:
             'fqt': 1,  # 前复权
             'beg': beg_date,
             'end': end_date,
-            'lmt': 150  # 最大返回150条
+            'lmt': 250  # 最大返回250条（约1年）
         }
         
         try:
-            resp = self.session.get(url, params=params, timeout=15)
+            resp = self.session.get(url, params=params, timeout=10)
             data = resp.json()
             
             if not data.get('data') or not data['data'].get('klines'):
@@ -206,15 +199,22 @@ class HistoricalDataDownloader:
                 if len(parts) < 7:
                     continue
                 
-                klines.append({
-                    'date': parts[0],
-                    'open': float(parts[1]),
-                    'close': float(parts[2]),
-                    'high': float(parts[3]),
-                    'low': float(parts[4]),
-                    'volume': float(parts[5]),
-                    'amount': float(parts[6])
-                })
+                # 解析K线数据
+                # 格式: 日期,开盘,收盘,最高,最低,成交量,成交额,振幅,涨跌幅,涨跌额,换手率
+                try:
+                    klines.append({
+                        'date': parts[0],
+                        'open': float(parts[1]),
+                        'close': float(parts[2]),
+                        'high': float(parts[3]),
+                        'low': float(parts[4]),
+                        'volume': float(parts[5]),
+                        'amount': float(parts[6]),
+                        'change_pct': float(parts[8]) if len(parts) > 8 else 0,
+                        'turnover_rate': float(parts[10]) if len(parts) > 10 else 0
+                    })
+                except (ValueError, IndexError):
+                    continue
             
             return klines
             
@@ -232,14 +232,6 @@ class HistoricalDataDownloader:
         saved_count = 0
         for kline in klines:
             try:
-                # 计算涨跌幅
-                change_pct = 0
-                if kline['open'] > 0:
-                    change_pct = ((kline['close'] - kline['open']) / kline['open']) * 100
-                
-                # 计算换手率（简化估算）
-                turnover_rate = 0
-                
                 cursor.execute('''
                     INSERT OR REPLACE INTO stock_klines 
                     (code, date, open, close, high, low, volume, amount, change_pct, turnover_rate)
@@ -253,8 +245,8 @@ class HistoricalDataDownloader:
                     kline['low'],
                     kline['volume'],
                     kline['amount'],
-                    change_pct,
-                    turnover_rate
+                    kline.get('change_pct', 0),
+                    kline.get('turnover_rate', 0)
                 ))
                 saved_count += 1
                 
@@ -265,20 +257,20 @@ class HistoricalDataDownloader:
         conn.close()
         return saved_count
     
-    def download_all(self, top_n=1000, delay=0.5):
+    def download_all(self, top_n=1000, delay=0.3):
         """
         批量下载所有活跃股历史数据
         
         Args:
             top_n: 下载前N只股票
-            delay: 每只股票请求间隔（秒），避免被封IP
+            delay: 每只股票请求间隔（秒）
         """
         print("\n" + "=" * 70)
         print("🚀 A股活跃股历史数据下载工具")
         print("=" * 70)
         
         # 1. 获取活跃股列表
-        stocks = self.fetch_active_stocks(top_n)
+        stocks = self.fetch_active_stocks_from_eastmoney(top_n)
         if not stocks:
             print("❌ 未获取到股票列表，退出")
             return
@@ -323,7 +315,8 @@ class HistoricalDataDownloader:
         print(f"成功: {success_count}")
         print(f"失败: {fail_count}")
         print(f"总K线条数: {total_saved:,}")
-        print(f"平均每只股票: {total_saved // max(success_count, 1):.0f} 天")
+        if success_count > 0:
+            print(f"平均每只股票: {total_saved // success_count:.0f} 天")
         print("=" * 70)
 
 
