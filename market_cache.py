@@ -1,125 +1,78 @@
 """
-市场数据缓存管理器 - SQLite本地数据库
-每天只调一次API，其余从缓存读取（有效期24小时）
-支持: A股(stock)、美股(us_stock)、期货(futures)、虚拟币(crypto)、新闻(news)
+market_cache - Simple SQLite-backed cache for morning report data.
+Provides get_cached, set_cache, get_stats functions.
 """
-import sqlite3
-import json
 import os
+import json
+import time
+import sqlite3
 from datetime import datetime, timedelta
 
-DB_PATH = os.path.join(os.path.dirname(__file__), 'data', 'market_cache.db')
-CACHE_HOURS = 24
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "market_cache.db")
 
 
-def init_db():
-    """初始化数据库"""
+def _get_conn():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS market_cache (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        category TEXT NOT NULL,
-        symbol TEXT NOT NULL,
-        data_json TEXT NOT NULL,
-        fetched_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        UNIQUE(category, symbol)
-    )''')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_category ON market_cache(category)')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_expires ON market_cache(expires_at)')
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cache (
+            category TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            ts REAL NOT NULL,
+            PRIMARY KEY (category, key)
+        )
+    """)
     conn.commit()
-    conn.close()
+    return conn
 
 
-def get_cached(category: str, symbol: str) -> dict | None:
-    """从缓存读取数据，过期则返回None"""
+def set_cache(category: str, key: str, value):
+    """Store a value in the cache with current timestamp."""
+    conn = _get_conn()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("""
-            SELECT data_json FROM market_cache
-            WHERE category=? AND symbol=? AND expires_at > datetime('now')
-        """, (category, symbol))
-        row = c.fetchone()
-        conn.close()
-        if row:
-            return json.loads(row['data_json'])
-        return None
-    except Exception:
-        return None
-
-
-def set_cache(category: str, symbol: str, data: dict):
-    """缓存数据，有效期24小时"""
-    try:
-        now = datetime.now()
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("""
-            INSERT OR REPLACE INTO market_cache
-            (category, symbol, data_json, fetched_at, expires_at)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            category, symbol, json.dumps(data, ensure_ascii=False),
-            now.strftime('%Y-%m-%d %H:%M:%S'),
-            (now + timedelta(hours=CACHE_HOURS)).strftime('%Y-%m-%d %H:%M:%S')
-        ))
+        conn.execute(
+            "INSERT OR REPLACE INTO cache (category, key, value, ts) VALUES (?, ?, ?, ?)",
+            (category, key, json.dumps(value, ensure_ascii=False), time.time()),
+        )
         conn.commit()
+    finally:
         conn.close()
-    except Exception:
-        pass
 
 
-def get_batch(category: str) -> list[dict]:
-    """批量读取某类别的所有缓存数据"""
+def get_cached(category: str, key: str, max_age_hours: int = 6) -> dict | list | None:
+    """Retrieve a cached value if it exists and is not older than max_age_hours."""
+    conn = _get_conn()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        c = conn.cursor()
-        c.execute("""
-            SELECT symbol, data_json FROM market_cache
-            WHERE category=? AND expires_at > datetime('now')
-            ORDER BY symbol
-        """, (category,))
-        rows = c.fetchall()
-        conn.close()
-        return [{'symbol': r['symbol'], 'data': json.loads(r['data_json'])} for r in rows]
+        row = conn.execute(
+            "SELECT value, ts FROM cache WHERE category = ? AND key = ?",
+            (category, key),
+        ).fetchone()
+        if row is None:
+            return None
+        value_str, ts = row
+        if time.time() - ts > max_age_hours * 3600:
+            return None
+        return json.loads(value_str)
     except Exception:
-        return []
-
-
-def clear_expired():
-    """清理过期数据"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("DELETE FROM market_cache WHERE expires_at <= datetime('now')")
-        deleted = c.rowcount
-        conn.commit()
+        return None
+    finally:
         conn.close()
-        return deleted
-    except Exception:
-        return 0
 
 
 def get_stats() -> dict:
-    """获取缓存统计信息"""
+    """Return cache statistics: total entries, categories, oldest/newest."""
+    conn = _get_conn()
     try:
-        conn = sqlite3.connect(DB_PATH)
-        c = conn.cursor()
-        c.execute("SELECT category, COUNT(*) as cnt FROM market_cache GROUP BY category")
-        categories = {row[0]: row[1] for row in c.fetchall()}
-        c.execute("SELECT COUNT(*) FROM market_cache WHERE expires_at > datetime('now')")
-        active = c.fetchone()[0]
-        c.execute("SELECT COUNT(*) FROM market_cache")
-        total = c.fetchone()[0]
+        rows = conn.execute("SELECT category, COUNT(*), MIN(ts), MAX(ts) FROM cache GROUP BY category").fetchall()
+        total = conn.execute("SELECT COUNT(*) FROM cache").fetchone()[0]
+        cat_stats = {}
+        for cat, cnt, min_ts, max_ts in rows:
+            cat_stats[cat] = {
+                "entries": cnt,
+                "oldest": datetime.fromtimestamp(min_ts).strftime("%Y-%m-%d %H:%M") if min_ts else None,
+                "newest": datetime.fromtimestamp(max_ts).strftime("%Y-%m-%d %H:%M") if max_ts else None,
+            }
+        return {"total_entries": total, "categories": cat_stats}
+    finally:
         conn.close()
-        return {'categories': categories, 'active': active, 'total': total}
-    except Exception:
-        return {}
-
-
-# 初始化
-init_db()

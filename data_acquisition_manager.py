@@ -166,8 +166,89 @@ class DataAcquisitionManager:
         
         self.conn.commit()
         
+    def _get_period(self, hour: int) -> str:
+        """根据小时返回时段分类"""
+        if 6 <= hour < 12:
+            return 'morning'
+        elif 12 <= hour < 18:
+            return 'afternoon'
+        elif 18 <= hour < 22:
+            return 'evening'
+        else:
+            return 'night'
+    
+    def _log_acquisition(self, run_id: str, symbol: str, asset_class_id: int, 
+                         source_id: int, source_name: str, status: str, duration_ms: float,
+                         error_msg: str = None, retry_count: int = 0, proxy_used: bool = False,
+                         data_valid: int = None, validation_notes: str = None,
+                         raw_sample: str = None):
+        """记录数据拉取日志到data_acquisition_log表"""
+        try:
+            from datetime import datetime
+            now = datetime.now()
+            cursor = self.conn.cursor()
+            
+            # 资产类别名称映射
+            asset_names = {1: 'us_stock', 2: 'a_stock', 3: 'future', 4: 'crypto'}
+            asset_class_name = asset_names.get(asset_class_id, f'unknown_{asset_class_id}')
+            
+            cursor.execute('''
+                INSERT INTO data_acquisition_log 
+                (run_id, timestamp, hour, day_of_week, is_weekend, period, asset_class, symbol,
+                 source_id, source_name, status, duration_ms, error_message, retry_count, 
+                 proxy_used, data_valid, validation_notes, raw_data_sample)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                run_id, now.strftime('%Y-%m-%d %H:%M:%S'), now.hour, now.weekday(),
+                1 if now.weekday() >= 5 else 0, self._get_period(now.hour),
+                asset_class_name, symbol, source_id, source_name, status,
+                duration_ms, error_msg, retry_count, 1 if proxy_used else 0,
+                data_valid, validation_notes, raw_sample[:500] if raw_sample else None
+            ))
+            self.conn.commit()
+        except Exception as e:
+            logger.error(f"日志记录失败: {e}")
+    
+    def _validate_data(self, data: Dict, symbol: str, asset_class_id: int) -> tuple:
+        """验证数据质量，返回(data_valid, notes)"""
+        try:
+            price = data.get('price', 0)
+            open_price = data.get('open_price', 0)
+            prev_close = data.get('prev_close', 0)
+            volume = data.get('volume', 0)
+            change_pct = data.get('change_pct', 0)
+            
+            issues = []
+            valid = True
+            
+            # 检查现价为负
+            if price < 0:
+                issues.append('现价为负')
+                valid = False
+            
+            # 检查开盘价为负
+            if open_price < 0:
+                issues.append('开盘价为负')
+                valid = False
+            
+            # 检查开盘价异常波动（超过昨收10%）
+            if prev_close > 0 and open_price > 0:
+                if abs(open_price - prev_close) / prev_close > 0.1:
+                    issues.append('开盘价异常波动')
+                    valid = False
+            
+            # 检查涨跌幅异常
+            if abs(change_pct) > 50:
+                issues.append('涨跌幅异常')
+                valid = False
+            
+            notes = '; '.join(issues) if issues else '正常'
+            return (1 if valid else 0, notes)
+        except Exception as e:
+            return (None, f'验证异常: {str(e)}')
+    
     def acquire_raw_data(self, symbol: str, asset_class_id: int, source_ids: List[int], 
-                        max_retries: int = 3) -> Dict[str, Any]:
+                        max_retries: int = 3, run_id: str = None) -> Dict[str, Any]:
         """
         获取原始数据 - 多渠道获取，失败重试
         
@@ -176,15 +257,28 @@ class DataAcquisitionManager:
             asset_class_id: 资产类别ID (1=美股, 2=A股, 3=期货, 4=加密货币)
             source_ids: 数据源ID列表
             max_retries: 最大重试次数
+            run_id: 本次拉取任务ID（用于关联日志）
             
         Returns:
             包含所有数据源结果的字典
         """
+        from datetime import datetime
+        import time as time_module
+        
+        # 生成run_id（如果没有提供）
+        if not run_id:
+            run_id = datetime.now().strftime('%Y%m%d_%H%M%S')
+        
+        # Normalize symbols: US stocks and futures should be uppercase
+        if asset_class_id in (1, 3):
+            symbol = symbol.upper()
+        
         results = {}
         
         for source_id in source_ids:
             retry_count = 0
             while retry_count < max_retries:
+                start_time = time_module.time()
                 try:
                     # 获取数据源信息
                     cursor = self.conn.cursor()
@@ -192,33 +286,59 @@ class DataAcquisitionManager:
                     source_info = cursor.fetchone()
                     
                     if not source_info:
+                        elapsed = (time_module.time() - start_time) * 1000
+                        self._log_acquisition(run_id, symbol, asset_class_id, source_id, 
+                                            '未知源', 'fail', elapsed, 
+                                            error_msg='Source not found', retry_count=retry_count)
                         results[str(source_id)] = {'status': 'failed', 'error': 'Source not found'}
                         break
                         
-                    # 判断是否需要代理
+                    source_name = source_info['name']
                     need_proxy = bool(source_info['need_proxy'])
                     
                     # 获取数据
                     data = self._fetch_from_source(symbol, asset_class_id, source_info['code'], use_proxy=need_proxy)
                     
                     if data:
+                        # 验证数据质量
+                        data_valid, validation_notes = self._validate_data(data, symbol, asset_class_id)
+                        
                         # 存入原始数据表
                         self._save_raw_data(symbol, asset_class_id, source_id, data, use_proxy=need_proxy)
+                        
+                        elapsed = (time_module.time() - start_time) * 1000
+                        raw_json = data.get('raw_json', '')
+                        
                         results[str(source_id)] = {'status': 'success', 'data': data}
                         self._update_source_health(source_id, success=True, proxy_used=need_proxy)
+                        
+                        # 记录成功日志
+                        self._log_acquisition(run_id, symbol, asset_class_id, source_id,
+                                            source_name, 'success', elapsed,
+                                            retry_count=retry_count, proxy_used=need_proxy,
+                                            data_valid=data_valid, validation_notes=validation_notes,
+                                            raw_sample=raw_json[:200])
                         break
                     else:
                         raise Exception("No data returned")
                         
                 except Exception as e:
                     retry_count += 1
+                    elapsed = (time_module.time() - start_time) * 1000
+                    
                     if retry_count >= max_retries:
                         results[str(source_id)] = {'status': 'failed', 'error': str(e)}
                         self._update_source_health(source_id, success=False)
                         self._send_notification(f"数据获取失败: {symbol} (source_id={source_id})", 
                                              level='error', source_id=source_id)
+                        
+                        # 记录失败日志
+                        self._log_acquisition(run_id, symbol, asset_class_id, source_id,
+                                            source_name if 'source_name' in dir() else '未知',
+                                            'fail', elapsed, error_msg=str(e),
+                                            retry_count=retry_count)
                     else:
-                        time.sleep(2 ** retry_count)  # 指数退避
+                        time_module.sleep(2 ** retry_count)  # 指数退避
                         
         return results
         
@@ -278,6 +398,11 @@ class DataAcquisitionManager:
             high = float(parts[6]) if parts[6] else 0
             low = float(parts[7]) if parts[7] else 0
             volume = float(parts[8]) if parts[8] else 0
+            
+            # 修复：新浪财经API返回的开盘价是错误的，使用昨收+涨跌额计算
+            if len(parts) > 2:
+                change = float(parts[2])
+                open_price = prev_close + change
             
             return {
                 'price': current_price,
@@ -421,11 +546,36 @@ class DataAcquisitionManager:
     def _fetch_crypto(self, symbol: str, source: str, use_proxy: bool) -> Optional[Dict]:
         """获取加密货币数据"""
         import requests
+        import os
+        from dotenv import load_dotenv
+        
+        # Load proxy config from .env
+        env_path = os.path.join(os.path.dirname(__file__), '.env')
+        load_dotenv(env_path)
+        proxy_http = os.environ.get('PROXY_HTTP', '')
+        proxies = {'http': proxy_http, 'https': proxy_http} if proxy_http else None
         
         try:
-            if source == 'coinbase':
-                url = f'https://api.coinbase.com/apis/v2/prices/{symbol}-USD/spot'
-                r = requests.get(url, timeout=10)
+            if source == 'binance':
+                # Binance: symbol is lowercase (btc), convert to BTCUSDT
+                binance_symbol = symbol.upper() + 'USDT'
+                url = f'https://api.binance.com/api/v3/ticker/24hr?symbol={binance_symbol}'
+                r = requests.get(url, timeout=15, proxies=proxies)
+                if r.status_code == 200:
+                    data = r.json()
+                    return {
+                        'price': float(data.get('lastPrice', 0)),
+                        'prev_close': float(data.get('weightedAvgPrice', 0)) * 0.99,  # approx prev close
+                        'change_pct': float(data.get('priceChangePercent', 0)),
+                        'volume': float(data.get('volume', 0)),
+                        'high': float(data.get('highPrice', 0)),
+                        'low': float(data.get('lowPrice', 0)),
+                        'name': data.get('symbol', binance_symbol)
+                    }
+                    
+            elif source == 'coinbase':
+                url = f'https://api.coinbase.com/apis/v2/prices/{symbol.upper()}-USD/spot'
+                r = requests.get(url, timeout=10, proxies=proxies)
                 if r.status_code == 200:
                     data = r.json()
                     return {
@@ -434,7 +584,7 @@ class DataAcquisitionManager:
                     }
                     
         except Exception as e:
-            logger.error(f"Crypto fetch error: {e}")
+            logger.error(f"Crypto fetch error for {source}/{symbol}: {e}")
             
         return None
         

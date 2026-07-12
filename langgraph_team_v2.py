@@ -998,10 +998,11 @@ def fetch_financial_news():
 
 
 # ========== 新增：晚报系统集成 ==========
+# ========== 新增：晚报系统集成（双框架差异化）==========
 def run_evening_report():
-    """运行晚报系统（零 Token 模式）"""
+    """运行晚报系统（零 Token 模式 - LangGraph版）"""
     print("\n" + "=" * 60)
-    print("📊 开始生成晚报...")
+    print("📊 开始生成晚报 (LangGraph数据驱动版)...")
     print("=" * 60)
     
     start_time = time.time()
@@ -1012,22 +1013,22 @@ def run_evening_report():
     data = source.get_all_data()
     source.close()
     
-    # Step 2: 生成晚报报告
-    from evening_report import build_evening_report
-    report = build_evening_report(data)
+    # Step 2: 生成晚报报告（LangGraph版 - 状态机驱动流程）
+    from evening_report import build_evening_report_langgraph, generate_comparison_summary
+    langgraph_report = build_evening_report_langgraph(data)
     
     total_elapsed = time.time() - start_time
     
     # Step 3: 保存报告
     report_path = r"C:\Users\Pactera\projects\langgraph_evening_report.txt"
     with open(report_path, "w", encoding="utf-8") as f:
-        f.write(report)
+        f.write(langgraph_report)
     
     output = {
         "framework": "LangGraph",
         "task": "A 股活跃股操盘晚报",
         "status": "success",
-        "result": report,
+        "result": langgraph_report,
         "data_source": "东方财富 API+ 腾讯 API 实时数据",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "execution_time": round(total_elapsed, 2),
@@ -1040,7 +1041,7 @@ def run_evening_report():
     
     print(f"\n💾 晚报已保存到: {report_path}")
     print(f"⏱️  执行时间: {total_elapsed:.2f}s")
-    print(f"\n📄 晚报内容:\n{report}")
+    print(f"\n📄 晚报内容:\n{langgraph_report}")
     
     return output
 

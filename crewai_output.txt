@@ -1,0 +1,34 @@
+============================================================
+🚀 [CrewAI团队] 开始独立实现活跃股操盘晨报系统
+   数据源: SQLite数据库 + API降级
+============================================================
+
+[Step 1] 从SQLite数据库获取数据...
+[MorningDataSource] 新闻数据为空，降级到API获取...
+[CrewAI-数据获取] 当前日期: 2026年07月08日 星期三
+[CrewAI-数据获取] 美股: 12只, A股: 58只, 期货: 8只
+
+[Step 2] 技术分析师开始工作...
+[CrewAI-技术分析师Agent] 开始计算技术指标...
+[CrewAI-技术分析师Agent] 计算完成，耗时: 0.00s
+
+[Step 2.5] 准备期货数据...
+
+[Step 2.6] 虚拟币数据（当前环境不可用）...
+[CrewAI-虚拟币数据] 获取到 0 只虚拟币（需要代理）
+
+[Step 2.7] 财经新闻...
+[CrewAI-财经新闻] 获取到 0 条新闻
+
+[Step 3] 晨报撰稿人开始工作...
+[CrewAI-晨报撰稿人Agent] 开始生成晨报...
+[CrewAI-晨报撰稿人Agent] ⚠️ 日期不正确，修正中...
+[CrewAI-晨报撰稿人Agent] 晨报生成完成，耗时: 60.34s
+[CrewAI-晨报撰稿人Agent] ✅ 日期验证：2026年07月08日
+
+💾 晨报已保存到: C:\Users\Pactera\projects\crewai_morning_report.txt
+💾 结果已保存到: C:\Users\Pactera\projects\crewai_result.json
+⏱️  总执行时间: 60.63s
+
+📄 CrewAI晨报内容:
+

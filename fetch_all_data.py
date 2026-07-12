@@ -80,7 +80,7 @@ def main(schedule: bool = False):
         # 1. 美股数据
         logger.info("Fetching US stocks...")
         us_stocks = dict(manager.config.items('us_stocks')) if manager.config.has_section('us_stocks') else {}
-        us_success, us_total = fetch_category(manager, 'us_stock', us_stocks, [1, 4], delay=0.5)
+        us_success, us_total = fetch_category(manager, 'us_stock', us_stocks, [1], delay=0.1)
         logger.info(f"US stocks: {us_success}/{us_total} successful")
         
         # 2. A股数据
@@ -93,7 +93,7 @@ def main(schedule: bool = False):
                     if symbol:
                         a_sectors[symbol] = sector_name.strip()
         
-        a_success, a_total = fetch_category(manager, 'a_stock', a_sectors, [2, 1, 3], delay=0.5)
+        a_success, a_total = fetch_category(manager, 'a_stock', a_sectors, [2], delay=0.1)
         logger.info(f"A-shares: {a_success}/{a_total} successful")
         
         # 3. 期货数据
@@ -101,13 +101,13 @@ def main(schedule: bool = False):
         futures = dict(manager.config.items('futures')) if manager.config.has_section('futures') else {}
         # 期货代码需要大写
         futures_upper = {k.upper(): v for k, v in futures.items()}
-        fu_success, fu_total = fetch_category(manager, 'futures', futures_upper, [1], delay=0.5)
+        fu_success, fu_total = fetch_category(manager, 'futures', futures_upper, [1], delay=0.1)
         logger.info(f"Futures: {fu_success}/{fu_total} successful")
         
         # 4. 加密货币数据
         logger.info("Fetching cryptocurrencies...")
         crypto = dict(manager.config.items('crypto')) if manager.config.has_section('crypto') else {}
-        cr_success, cr_total = fetch_category(manager, 'crypto', crypto, [6, 7], delay=0.5)
+        cr_success, cr_total = fetch_category(manager, 'crypto', crypto, [6], delay=0.1)
         logger.info(f"Crypto: {cr_success}/{cr_total} successful")
         
         # 5. 数据规整
