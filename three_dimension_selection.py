@@ -247,6 +247,79 @@ class ThreeDimensionSelector:
             print(f"[ThreeDimension] 加载历史数据失败: {e}")
         
         return history
+        
+        Args:
+            db_path: 数据库路径，默认使用项目data/market_data.db
+        """
+        if db_path is None:
+            import os
+            db_path = os.path.join(os.path.dirname(__file__), 'data', 'market_data.db')
+        
+        self.db_path = db_path
+        self.data_source = MorningDataSource()
+        
+        # 加载历史数据
+        self.history_data = self._load_history_data()
+    
+    def _load_history_data(self) -> dict:
+        """
+        从数据库加载历史K线数据
+        
+        Returns:
+            dict: {code: [{'date', 'open', 'close', 'high', 'low', 'volume', 'amount'}, ...]}
+        """
+        import sqlite3
+        
+        history = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # 获取所有有历史数据的股票
+            cursor.execute('''
+                SELECT code, date, open, close, high, low, volume, amount
+                FROM stock_klines
+                ORDER BY code, date
+            ''')
+            
+            rows = cursor.fetchall()
+            
+            # 按股票代码分组
+            current_code = None
+            current_klines = []
+            
+            for row in rows:
+                code = row[0]
+                if code != current_code:
+                    # 保存上一个股票的数据
+                    if current_code and current_klines:
+                        history[current_code] = current_klines
+                    
+                    # 开始新股票
+                    current_code = code
+                    current_klines = []
+                
+                current_klines.append({
+                    'date': row[1],
+                    'open': row[2],
+                    'close': row[3],
+                    'high': row[4],
+                    'low': row[5],
+                    'volume': row[6],
+                    'amount': row[7]
+                })
+            
+            # 保存最后一个股票
+            if current_code and current_klines:
+                history[current_code] = current_klines
+            
+            conn.close()
+            print(f"[ThreeDimension] 从数据库加载 {len(history)} 只股票历史数据")
+            
+        except Exception as e:
+            print(f"[ThreeDimension] 加载历史数据失败: {e}")
+        
+        return history
         self.indicators = {}  # 技术指标
         
     def run_full_workflow(self):
