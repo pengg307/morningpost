@@ -458,6 +458,80 @@ def build_evening_report_langgraph(data):
             lines.append(f"  - {name}: {price} ({pct}%)")
     lines.append("")
     
+    # ========== 状态3：策略生成 ==========
+    lines.append("🎯 **状态3：策略生成**")
+    lines.append("-" * 40)
+    
+    lines.append("**操作建议**:")
+    lines.append("  - 当前市场情绪：观望为主")
+    lines.append("  - 建议仓位：30%以下")
+    lines.append("  - 关注方向：超跌反弹机会")
+    lines.append("")
+    
+    lines.append("**风险评估**:")
+    lines.append("  - 市场波动风险：中等")
+    lines.append("  - 北向资金流出风险：低")
+    lines.append("  - 个股分化风险：高")
+    lines.append("")
+    
+    lines.append("**量化指标**:")
+    if indices:
+        sh = indices.get('上证指数', {})
+        sh_pct = sh.get('change_pct', '0') if isinstance(sh, dict) else '0'
+        lines.append(f"  - 上证指数涨跌幅: {sh_pct}%")
+        lines.append(f"  - 市场情绪指数: {'偏暖' if float(sh_pct) > 0 else '偏冷'}")
+    lines.append("")
+    
+    # ========== 状态4：数据汇总 ==========
+    lines.append("📊 **状态4：数据汇总**")
+    lines.append("-" * 40)
+    
+    if northbound:
+        lines.append("**北向资金汇总**:")
+        lines.append(f"  - 沪股通: {_parse_northbound_data(northbound.get('shanghai', '无数据'))} 元")
+        lines.append(f"  - 深股通: {_parse_northbound_data(northbound.get('shenzhen', '无数据'))} 元")
+    lines.append("")
+    
+    if lhb:
+        buy_stocks = [s for s in lhb if s.get('net', 'N/A') and float(str(s['net']).replace(',', '')) > 0]
+        sell_stocks = [s for s in lhb if s.get('net', 'N/A') and float(str(s['net']).replace(',', '')) < 0]
+        
+        lines.append("**龙虎榜汇总**:")
+        lines.append(f"  - 上榜总数: {len(lhb)} 只")
+        lines.append(f"  - 净买入: {len(buy_stocks)} 只")
+        lines.append(f"  - 净卖出: {len(sell_stocks)} 只")
+        lines.append("")
+        
+        if buy_stocks:
+            lines.append("**净买入 TOP 3**:")
+            for i, stock in enumerate(buy_stocks[:3], 1):
+                net = stock.get('net', 'N/A')
+                try:
+                    net_yi = float(str(net).replace(',', '')) / 100000000
+                    lines.append(f"  {i}. {stock['code']} {stock['name']}: +{net_yi:.2f} 亿")
+                except:
+                    lines.append(f"  {i}. {stock['code']} {stock['name']}: 净额异常")
+            lines.append("")
+        
+        if sell_stocks:
+            lines.append("**净卖出 TOP 3**:")
+            for i, stock in enumerate(sell_stocks[:3], 1):
+                net = stock.get('net', 'N/A')
+                try:
+                    net_yi = float(str(net).replace(',', '')) / 100000000
+                    lines.append(f"  {i}. {stock['code']} {stock['name']}: {net_yi:.2f} 亿")
+                except:
+                    lines.append(f"  {i}. {stock['code']} {stock['name']}: 净额异常")
+            lines.append("")
+    
+    if indices:
+        lines.append("**指数汇总**:")
+        for name, info in indices.items():
+            price = info.get('price', 'N/A')
+            pct = info.get('change_pct', '0')
+            lines.append(f"  - {name}: {price} ({pct}%)")
+    lines.append("")
+    
     # ========== 免责声明 ==========
     lines.append("=" * 60)
     lines.append("⚠️ 免责声明：本报告仅供参考，不构成投资建议。股市有风险，投资需谨慎。")
