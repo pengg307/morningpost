@@ -194,7 +194,76 @@ def build_evening_report_crewai(data):
     lines.append("4. 注意风险控制，设置止损止盈")
     lines.append("")
     
-    # ========== 八、免责声明 ==========
+    # ========== 九、三维共振选股系统（新增）==========
+    lines.append("")
+    lines.append("=" * 60)
+    lines.append("📊 【三维共振选股系统】")
+    lines.append("=" * 60)
+    lines.append("")
+    
+    try:
+        from three_dimension_selection import ThreeDimensionSelector
+        
+        selector = ThreeDimensionSelector()
+        results = selector.run_full_workflow()
+        
+        # 市场状态
+        lines.append(f"📈 **市场状态**: {results['market_status']}")
+        lines.append(f"💰 **建议仓位**: {results['position_suggestion']}")
+        lines.append("")
+        
+        # 强势板块
+        if results.get('strong_sectors'):
+            lines.append("🔥 **强势板块 (RPS>85)**:")
+            for sector in results['strong_sectors'][:5]:
+                lines.append(f"  - {sector['name']}: RPS={sector['rps_20']:.1f}, 涨幅={sector['change_pct']:.2f}%")
+            lines.append("")
+        
+        # 强势股
+        if results.get('strong_stocks'):
+            lines.append("🎯 **强势股 (多周期RPS共振)**:")
+            for stock in results['strong_stocks'][:10]:
+                lines.append(
+                    f"  - {stock['code']} {stock['name']}: "
+                    f"价格={stock['price']:.2f}, "
+                    f"涨幅={stock['change_pct']:+.2f}%, "
+                    f"RPS(20/50/120)={stock['rps_20']:.1f}/{stock['rps_50']:.1f}/{stock['rps_120']:.1f}, "
+                    f"DBQR={stock['dbqr']:.2f}, "
+                    f"评分={stock['score']}"
+                )
+            lines.append("")
+        
+        # 关注列表
+        if results.get('watch_list'):
+            lines.append("👀 **关注列表**:")
+            for stock in results['watch_list'][:5]:
+                lines.append(
+                    f"  - {stock['code']} {stock['name']}: "
+                    f"价格={stock['price']:.2f}, "
+                    f"涨幅={stock['change_pct']:+.2f}%, "
+                    f"评分={stock['score']}"
+                )
+            lines.append("")
+        
+        # 推荐建议
+        if results.get('recommendations'):
+            lines.append("💡 **推荐建议**:")
+            for rec in results['recommendations']:
+                lines.append(f"  {rec}")
+            lines.append("")
+        
+        # 风险提示
+        if results.get('risk_warnings'):
+            lines.append("⚠️ **风险提示**:")
+            for warning in results['risk_warnings']:
+                lines.append(f"  {warning}")
+            lines.append("")
+            
+    except Exception as e:
+        lines.append(f"⚠️ 三维共振选股系统运行异常: {e}")
+        lines.append("")
+    
+    # ========== 十、免责声明 ==========
     lines.append("=" * 60)
     lines.append("⚠️ 免责声明：本报告仅供参考，不构成投资建议。股市有风险，投资需谨慎。")
     lines.append("=" * 60)
