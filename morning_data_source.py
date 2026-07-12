@@ -75,8 +75,29 @@ class MorningDataSource:
         return None
 
     def _fetch_a_stocks(self) -> list:
-        """Fetch A-stock real-time data from Tencent API."""
-        codes = ['sh300308','sz000725','sh301308','sh300502','sz001309','sz002384','sh688525','sh688008','sh688256','sz300223']
+        """Fetch A-stock real-time data from Tencent API - expanded to 50+ active stocks."""
+        codes = [
+            # 沪深300权重股
+            'sh600519','sh601318','sz000858','sz000333','sz002594','sz000725',
+            'sh600036','sh601166','sh600900','sh600276','sh601888','sh600809',
+            'sz000568','sz002415','sz002304','sz000001','sz002714','sz002475',
+            # 创业板/科创板热门股
+            'sz300750','sz300059','sz300015','sz300760','sz300124','sz300308',
+            'sh688981','sh688012','sh688008','sh688525','sh688256','sh688111',
+            # 新能源/光伏/半导体
+            'sz300274','sz300750','sz002129','sz002459','sz002142','sz002340',
+            'sz002230','sz002049','sz002493','sz002192',
+            # 消费/医药
+            'sz000858','sz000596','sz002304','sz300015','sz300760',
+            # 金融/地产
+            'sh600036','sh601318','sh601688','sh601288','sh600030',
+            # 军工/航天
+            'sh600760','sh600893','sz002013','sz002179',
+            # 其他活跃股
+            'sz000651','sz000725','sz002384','sz300223','sh603259','sh600585',
+        ]
+        # 去重
+        codes = list(dict.fromkeys(codes))
         url = f'http://qt.gtimg.cn/q={",".join(codes)}'
         stocks = []
         resp = self._safe_get(url, timeout=5)
